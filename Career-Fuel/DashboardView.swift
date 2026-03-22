@@ -453,10 +453,16 @@ private struct RunwayCardContentView: View, Equatable {
                                 value: content.projectedZeroDate.formatted(.dateTime.month(.abbreviated).day())
                             )
                             MiniStatCard(
-                                title: "Predicted burn",
+                                title: "Average daily spend (including zero days)",
                                 value: content.burnRateConfidence == .insufficient
                                     ? "Not enough data"
                                     : content.dailyBurnRate.currencyString
+                            )
+                            MiniStatCard(
+                                title: "Spend per active day",
+                                value: content.burnRateConfidence == .insufficient
+                                    ? "Not enough data"
+                                    : content.activeDailySpendRate.currencyString
                             )
                             MiniStatCard(title: "AI target burn", value: content.recommendedDailyBudget.currencyString)
                         }
@@ -467,10 +473,16 @@ private struct RunwayCardContentView: View, Equatable {
                                 value: content.projectedZeroDate.formatted(.dateTime.month(.abbreviated).day())
                             )
                             MiniStatCard(
-                                title: "Predicted burn",
+                                title: "Average daily spend (including zero days)",
                                 value: content.burnRateConfidence == .insufficient
                                     ? "Not enough data"
                                     : content.dailyBurnRate.currencyString
+                            )
+                            MiniStatCard(
+                                title: "Spend per active day",
+                                value: content.burnRateConfidence == .insufficient
+                                    ? "Not enough data"
+                                    : content.activeDailySpendRate.currencyString
                             )
                             MiniStatCard(title: "AI target burn", value: content.recommendedDailyBudget.currencyString)
                         }
@@ -504,7 +516,7 @@ private struct RunwayCardContentView: View, Equatable {
                         .foregroundStyle(AppPalette.accent)
                         .frame(minHeight: 46, alignment: .leading)
 
-                    Label("Log at least 3 expense days to estimate runway accurately.", systemImage: "clock.badge.exclamationmark")
+                    Label("Log a few expense days so average daily spend and active-day intensity can settle.", systemImage: "clock.badge.exclamationmark")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(AppPalette.textSecondary)
                 }
@@ -824,7 +836,7 @@ private struct DashboardHeaderContent: Equatable {
 
     static let placeholder = DashboardHeaderContent(
         dateChipTitle: Date.now.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()),
-        financeChipTitle: "Predicted burn \(0.0.currencyString)/day",
+        financeChipTitle: "Avg daily spend \(0.0.currencyString)/day",
         modeChipSymbol: AppMode.jobSearch.symbol,
         modeChipTitle: AppMode.jobSearch.title,
         headline: "Career runway control panel",
@@ -839,9 +851,11 @@ private struct RunwayCardContent: Equatable {
     var currentBalance: Double
     var daysLeft: Int
     var observedExpenseDays: Int
+    var trackedCalendarDays: Int
     var weeklySpending: Double
     var projectedZeroDate: Date
     var dailyBurnRate: Double
+    var activeDailySpendRate: Double
     var weightedDailyBurnRate: Double
     var recommendedDailyBudget: Double
     var burnRateConfidence: BurnRateConfidence
@@ -853,6 +867,8 @@ private struct RunwayCardContent: Equatable {
     var syncMessage: String
     var sevenDayTrend: [DailyExpensePoint]
     var isAIRefreshing: Bool
+    var spendingFrequency: Double
+    var spenderBehavior: SpenderBehavior
 
     var burnComparisonMessage: String {
         if burnRateConfidence == .insufficient {
@@ -860,24 +876,29 @@ private struct RunwayCardContent: Equatable {
         }
 
         if burnRateConfidence == .low {
-            return "This forecast is early and based on only \(observedExpenseDays) spending day\(observedExpenseDays == 1 ? "" : "s")."
+            return "This forecast is early and based on \(trackedCalendarDays) tracked calendar day\(trackedCalendarDays == 1 ? "" : "s"), with \(observedExpenseDays) active spend day\(observedExpenseDays == 1 ? "" : "s")."
+        }
+
+        if dailyBurnRate > 0, activeDailySpendRate >= dailyBurnRate * 1.35 {
+            return "Your spend is concentrated on active days. Large transaction days can compress runway even when some days stay at zero."
         }
 
         return weeklySpending > recommendedDailyBudget * 7
-            ? "You’re spending faster than the AI target burn."
-            : "Your burn rate is inside the AI target range this week."
+            ? "Your average daily spend is above the AI target pace this week."
+            : "Average daily spend and active-day intensity are both inside the target range this week."
     }
 
     var burnRateSupportingMessage: String {
+        let frequencyPct = Int((spendingFrequency * 100).rounded())
         switch burnRateConfidence {
         case .insufficient:
             return "Not enough data yet"
         case .low:
-            return "Based on \(observedExpenseDays) spending day\(observedExpenseDays == 1 ? "" : "s") · low confidence"
+            return "Based on \(trackedCalendarDays) calendar day\(trackedCalendarDays == 1 ? "" : "s") and \(observedExpenseDays) spend day\(observedExpenseDays == 1 ? "" : "s") (\(frequencyPct)% frequency, \(spenderBehavior.displayLabel)) · low confidence"
         case .medium:
-            return "Based on \(observedExpenseDays) spending day\(observedExpenseDays == 1 ? "" : "s") · medium confidence"
+            return "Based on \(trackedCalendarDays) calendar day\(trackedCalendarDays == 1 ? "" : "s") and \(observedExpenseDays) spend day\(observedExpenseDays == 1 ? "" : "s") (\(frequencyPct)% frequency, \(spenderBehavior.displayLabel)) · medium confidence"
         case .high:
-            return "Based on \(observedExpenseDays) spending day\(observedExpenseDays == 1 ? "" : "s") · high confidence"
+            return "Based on \(trackedCalendarDays) calendar day\(trackedCalendarDays == 1 ? "" : "s") and \(observedExpenseDays) spend day\(observedExpenseDays == 1 ? "" : "s") (\(frequencyPct)% frequency, \(spenderBehavior.displayLabel)) · high confidence"
         }
     }
 
@@ -885,9 +906,11 @@ private struct RunwayCardContent: Equatable {
         currentBalance: 0,
         daysLeft: 0,
         observedExpenseDays: 0,
+        trackedCalendarDays: 0,
         weeklySpending: 0,
         projectedZeroDate: Date(),
         dailyBurnRate: 0,
+        activeDailySpendRate: 0,
         weightedDailyBurnRate: 0,
         recommendedDailyBudget: 40,
         burnRateConfidence: .insufficient,
@@ -898,7 +921,9 @@ private struct RunwayCardContent: Equatable {
         runwayMessage: "",
         syncMessage: "",
         sevenDayTrend: [],
-        isAIRefreshing: false
+        isAIRefreshing: false,
+        spendingFrequency: 0,
+        spenderBehavior: .mixed
     )
 }
 
@@ -1002,12 +1027,14 @@ private struct EmployedOverviewContent: Equatable {
     var stabilityTone: StatusTone
     var stabilityLabel: String
     var stabilityMessage: String
+    var spendingFrequency: Double
+    var spenderBehavior: SpenderBehavior
 
     var savingsRateLabel: String {
         if monthlyProjectionConfidence == .insufficient {
             return "No data"
         }
-        "\(Int((max(savingsRate, 0) * 100).rounded()))%"
+        return "\(Int((max(savingsRate, 0) * 100).rounded()))%"
     }
 
     var monthlyMarginLabel: String {
@@ -1036,7 +1063,7 @@ private struct EmployedOverviewContent: Equatable {
             return "No monthly expense projection yet. Start logging expenses so income can be compared against real spending."
         }
 
-        return "Income \(monthlyIncome.currencyString) vs estimated expenses \(monthlyExpenseEstimate.currencyString) each month. Based on \(monthlyProjectionObservedDays) day\(monthlyProjectionObservedDays == 1 ? "" : "s") of expense data."
+        return "You spend on \(monthlyProjectionObservedDays) out of 30 days (\(Int((spendingFrequency * 100).rounded()))% frequency, \(spenderBehavior.displayLabel)). Income \(monthlyIncome.currencyString) vs estimated expenses \(monthlyExpenseEstimate.currencyString) each month."
     }
 
     static let placeholder = EmployedOverviewContent(
@@ -1053,7 +1080,9 @@ private struct EmployedOverviewContent: Equatable {
         runwayIfUnemployedAgainDays: 0,
         stabilityTone: .warning,
         stabilityLabel: "Income Missing",
-        stabilityMessage: "Set your monthly take-home pay to unlock financial stability signals."
+        stabilityMessage: "Set your monthly take-home pay to unlock financial stability signals.",
+        spendingFrequency: 0,
+        spenderBehavior: .mixed
     )
 }
 
@@ -1100,7 +1129,7 @@ private final class DashboardHeaderSectionModel: ObservableObject {
                 financeChipTitle: mode == .jobSearch
                     ? (financeState.burnRateConfidence == .insufficient
                         ? "Burn data still building"
-                        : "Predicted burn \(financeState.dailyBurnRate.currencyString)/day")
+                        : "Avg daily spend \(financeState.dailyBurnRate.currencyString)/day")
                     : (financeState.monthlyIncome > 0 ? "Income \(financeState.monthlyIncome.currencyString)/mo" : "Set monthly income"),
                 modeChipSymbol: mode.symbol,
                 modeChipTitle: mode.title,
@@ -1188,9 +1217,11 @@ private final class RunwayCardSectionModel: ObservableObject {
                 currentBalance: snapshot.currentBalance,
                 daysLeft: snapshot.daysLeft,
                 observedExpenseDays: snapshot.observedExpenseDays,
+                trackedCalendarDays: snapshot.trackedCalendarDays,
                 weeklySpending: snapshot.weeklySpending,
                 projectedZeroDate: snapshot.projectedZeroDate,
                 dailyBurnRate: snapshot.dailyBurnRate,
+                activeDailySpendRate: snapshot.activeDailySpendRate,
                 weightedDailyBurnRate: snapshot.weightedDailyBurnRate,
                 recommendedDailyBudget: recommendedDailyBudget,
                 burnRateConfidence: snapshot.burnRateConfidence,
@@ -1201,7 +1232,9 @@ private final class RunwayCardSectionModel: ObservableObject {
                 runwayMessage: runwayStatus.message,
                 syncMessage: syncMessage,
                 sevenDayTrend: snapshot.sevenDayTrend,
-                isAIRefreshing: isRefreshingExpenseInsights
+                isAIRefreshing: isRefreshingExpenseInsights,
+                spendingFrequency: snapshot.spendingFrequency,
+                spenderBehavior: snapshot.spenderBehavior
             )
         }
         .removeDuplicates()
@@ -1287,10 +1320,10 @@ private final class MetricStackSectionModel: ObservableObject {
                     footnote: employmentSnapshot.monthlyProjectionConfidence == .insufficient
                         ? "Log expenses first. Monthly projection appears after real transaction data is available."
                         : employmentSnapshot.monthlyProjectionConfidence == .low
-                            ? "Based on \(employmentSnapshot.monthlyProjectionObservedDays) days of data. Keep logging to stabilize the estimate."
+                            ? "Based on \(employmentSnapshot.monthlyProjectionObservedDays) days of data (\(employmentSnapshot.spenderBehavior.displayLabel)). Keep logging to stabilize the estimate."
                             : employmentSnapshot.monthlySavingsCapacity < 0
                                 ? "Expenses are above current income. Reset recurring costs before they harden."
-                                : "Based on \(employmentSnapshot.monthlyProjectionObservedDays) days of recent expense data."
+                                : "Based on \(employmentSnapshot.monthlyProjectionObservedDays) days of recent expense data (\(employmentSnapshot.spenderBehavior.displayLabel))."
                 ),
                 weeklySpendingMetric: MetricItemContent(
                     title: "Savings Progress",
@@ -1342,11 +1375,11 @@ private final class MetricStackSectionModel: ObservableObject {
         }
 
         if snapshot.spendingTrend == .increasing {
-            return "Recent spend is rising, so the runway forecast is using a higher predicted burn."
+            return "Recent spend is rising on active days, so keep a close eye on large transaction days."
         }
 
         if snapshot.spendingTrend == .decreasing {
-            return "Recent spend is cooling, so the forecast is easing predicted burn slightly."
+            return "Recent spend is cooling, which helps protect runway if that pattern holds."
         }
 
         return snapshot.weeklySpending > recommendedDailyBudget * 7
@@ -1389,7 +1422,9 @@ private final class EmployedOverviewSectionModel: ObservableObject {
                 runwayIfUnemployedAgainDays: employmentSnapshot.runwayIfUnemployedAgainDays,
                 stabilityTone: employmentSnapshot.stabilityTone,
                 stabilityLabel: employmentSnapshot.stabilityLabel,
-                stabilityMessage: employmentSnapshot.stabilityMessage
+                stabilityMessage: employmentSnapshot.stabilityMessage,
+                spendingFrequency: employmentSnapshot.spendingFrequency,
+                spenderBehavior: employmentSnapshot.spenderBehavior
             )
         }
         .removeDuplicates()

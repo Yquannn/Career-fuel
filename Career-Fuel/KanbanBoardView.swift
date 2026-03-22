@@ -15,6 +15,7 @@ struct KanbanBoardView: View {
     @State private var showingStageEditor = false
     @State private var editingStage: JobStage?
     @State private var pendingDeleteStage: JobStage?
+    @State private var showingTargetEditor = false
     @State private var isResearchExpanded = false
     @State private var isPrepExpanded = false
 
@@ -63,6 +64,11 @@ struct KanbanBoardView: View {
                 } else {
                     jobStore.addStage(title: title, subtitle: subtitle, tone: tone)
                 }
+            }
+        }
+        .sheet(isPresented: $showingTargetEditor) {
+            WeeklyTargetSheet(initialTarget: jobStore.weeklyApplicationTarget) { target in
+                jobStore.updateWeeklyApplicationTarget(target)
             }
         }
         .confirmationDialog(
@@ -150,6 +156,8 @@ struct KanbanBoardView: View {
 
     private var jobSearchBoard: some View {
         Group {
+            jobSearchSummary
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 16) {
                     ForEach(jobStore.sortedStages) { stage in
@@ -383,6 +391,109 @@ struct KanbanBoardView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private var jobSearchSummary: some View {
+        let snapshot = jobStore.decisionSnapshot
+
+        return SurfaceCard {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Pipeline Health")
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(AppPalette.textPrimary)
+
+                        HStack(alignment: .lastTextBaseline, spacing: 10) {
+                            Text("\(snapshot.pipelineHealth.score)")
+                                .font(.system(size: 40, weight: .bold, design: .rounded))
+                                .foregroundStyle(snapshot.pipelineHealth.tone.color)
+                                .monospacedDigit()
+
+                            StatusBadge(label: snapshot.pipelineHealth.label, tone: snapshot.pipelineHealth.tone)
+                        }
+
+                        Text(snapshot.pipelineHealth.message)
+                            .font(.subheadline)
+                            .foregroundStyle(AppPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        showingTargetEditor = true
+                    } label: {
+                        Label("Weekly Target", systemImage: "target")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(AppPalette.textPrimary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(AppPalette.surfaceSecondary)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(AppPalette.border, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Group {
+                    if isWideLayout {
+                        HStack(spacing: 12) {
+                            MiniStatCard(
+                                title: "Weekly Progress",
+                                value: "\(snapshot.weeklyApplicationsProgress)/\(snapshot.weeklyApplicationTarget)"
+                            )
+                            MiniStatCard(
+                                title: "App -> Interview",
+                                value: "\(snapshot.conversions.applicationToInterviewRate)%"
+                            )
+                            MiniStatCard(
+                                title: "Interview -> Offer",
+                                value: "\(snapshot.conversions.interviewToOfferRate)%"
+                            )
+                            MiniStatCard(
+                                title: "Follow-ups Due",
+                                value: "\(snapshot.followUpDueCount)"
+                            )
+                        }
+                    } else {
+                        VStack(spacing: 12) {
+                            MiniStatCard(
+                                title: "Weekly Progress",
+                                value: "\(snapshot.weeklyApplicationsProgress)/\(snapshot.weeklyApplicationTarget)"
+                            )
+                            MiniStatCard(
+                                title: "App -> Interview",
+                                value: "\(snapshot.conversions.applicationToInterviewRate)%"
+                            )
+                            MiniStatCard(
+                                title: "Interview -> Offer",
+                                value: "\(snapshot.conversions.interviewToOfferRate)%"
+                            )
+                            MiniStatCard(
+                                title: "Follow-ups Due",
+                                value: "\(snapshot.followUpDueCount)"
+                            )
+                        }
+                    }
+                }
+
+                if snapshot.staleApplicationsCount > 0 {
+                    Label(
+                        "\(snapshot.staleApplicationsCount) application\(snapshot.staleApplicationsCount == 1 ? " is" : "s are") stale. Refresh the quietest roles first.",
+                        systemImage: "clock.badge.exclamationmark"
+                    )
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(snapshot.highPriorityStaleCount > 0 ? AppPalette.danger : AppPalette.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
     private func currentJobSection(
         application: JobApplication,
         employment: AcceptedEmployment
@@ -519,6 +630,12 @@ struct KanbanBoardView: View {
         let suggestion = aiService.jobSuggestions[application.id] ?? aiService.jobSuggestion(for: application)
         let researchStatus = aiService.interviewResearchStatus(for: application.id)
         let showsQuestionFallback = suggestion.webResearch?.likelyQuestions.isEmpty ?? true
+        let daysInStage = jobStore.daysInStage(for: application)
+        let followUpDate = jobStore.recommendedFollowUpDate(for: application)
+        let isFollowUpDue = jobStore.isFollowUpDue(application)
+        let isStale = jobStore.isStale(application)
+        let lastContactText = application.lastContactDate?.formatted(.dateTime.month(.abbreviated).day()) ?? "No contact yet"
+        let nextFollowUpText = followUpDate?.formatted(.dateTime.month(.abbreviated).day()) ?? "No follow-up needed"
 
         return SurfaceCard {
             VStack(alignment: .leading, spacing: 16) {
@@ -542,6 +659,18 @@ struct KanbanBoardView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(AppPalette.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        if isStale || isFollowUpDue {
+                            Label(
+                                isStale
+                                    ? "This application looks stale. A fresh follow-up could restart momentum."
+                                    : "A follow-up is due soon. Keep this role warm while the conversation is active.",
+                                systemImage: isStale ? "clock.badge.exclamationmark" : "paperplane.fill"
+                            )
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(isStale ? AppPalette.danger : AppPalette.accent)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                     }
 
@@ -569,16 +698,38 @@ struct KanbanBoardView: View {
                     if isWideLayout {
                         HStack(spacing: 12) {
                             MiniStatCard(title: "Date applied", value: application.dateApplied.formatted(.dateTime.month(.abbreviated).day()))
+                            MiniStatCard(title: "Days in stage", value: daysInStage == 0 ? "Today" : "\(daysInStage)d")
                             MiniStatCard(title: "Priority", value: application.priority)
-                            MiniStatCard(title: "Location", value: application.location)
+                            MiniStatCard(title: "Last contact", value: lastContactText)
+                            MiniStatCard(title: "Next follow-up", value: nextFollowUpText)
                         }
                     } else {
                         VStack(spacing: 12) {
                             MiniStatCard(title: "Date applied", value: application.dateApplied.formatted(.dateTime.month(.abbreviated).day()))
+                            MiniStatCard(title: "Days in stage", value: daysInStage == 0 ? "Today" : "\(daysInStage)d")
                             MiniStatCard(title: "Priority", value: application.priority)
-                            MiniStatCard(title: "Location", value: application.location)
+                            MiniStatCard(title: "Last contact", value: lastContactText)
+                            MiniStatCard(title: "Next follow-up", value: nextFollowUpText)
                         }
                     }
+                }
+
+                if appModeStore.mode == .jobSearch {
+                    Button {
+                        jobStore.logFollowUp(id: application.id)
+                    } label: {
+                        Label("Log Follow-up Today", systemImage: "paperplane.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .fill(AppPalette.primary)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 if !application.tags.isEmpty {
@@ -588,6 +739,45 @@ struct KanbanBoardView: View {
                                 SmallChip(title: tag)
                             }
                         }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Timeline")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(AppPalette.textPrimary)
+
+                    ForEach(application.timeline.prefix(6)) { event in
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: event.kind.symbol)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(AppPalette.primary)
+                                .frame(width: 18, height: 18)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(event.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(AppPalette.textPrimary)
+
+                                    Spacer()
+
+                                    Text(event.date.formatted(.dateTime.month(.abbreviated).day()))
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(AppPalette.textSecondary)
+                                }
+
+                                Text(event.detail)
+                                    .font(.subheadline)
+                                    .foregroundStyle(AppPalette.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(AppPalette.surfaceSecondary)
+                        )
                     }
                 }
 
@@ -630,6 +820,8 @@ struct KanbanBoardView: View {
         suggestion: AIJobSuggestion,
         researchStatus: InterviewResearchStatus
     ) -> some View {
+        let displayedResearch = suggestion.webResearch ?? researchStatus.fallbackResearch
+
         VStack(alignment: .leading, spacing: 14) {
             Button {
                 Task {
@@ -653,13 +845,13 @@ struct KanbanBoardView: View {
             .buttonStyle(.plain)
             .disabled(researchStatus.isLoading || !aiService.canUseWebInterviewResearch)
 
-            if !aiService.hasStoredGeminiAPIKey {
-                Label("Add a Gemini API key in Settings to enable this.", systemImage: "key.fill")
+            if !aiService.isAdvancedAIEnabled {
+                Label("Advanced AI is optional. Turn it on in Settings if you want live public interview research and source links. Your on-device prep is already active below.", systemImage: "sparkles")
                     .font(.subheadline)
                     .foregroundStyle(AppPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if !aiService.isWebInterviewResearchEnabled {
-                Label("Enable Web interview research in Settings before running this.", systemImage: "togglepower")
+            } else if !aiService.hasStoredGeminiAPIKey {
+                Label("Add a Gemini API key in Settings only if you want live public interview research. CareerFuel will keep using on-device AI without it.", systemImage: "key.fill")
                     .font(.subheadline)
                     .foregroundStyle(AppPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -671,13 +863,13 @@ struct KanbanBoardView: View {
             }
 
             if let errorMessage = researchStatus.errorMessage {
-                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                Label(errorMessage, systemImage: researchStatus.fallbackResearch == nil ? "exclamationmark.triangle.fill" : "brain.head.profile")
                     .font(.subheadline)
-                    .foregroundStyle(AppPalette.danger)
+                    .foregroundStyle(researchStatus.fallbackResearch == nil ? AppPalette.danger : AppPalette.accent)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let research = suggestion.webResearch {
+            if let research = displayedResearch {
                 HStack(spacing: 10) {
                     InfoChip(
                         symbol: "clock.badge.checkmark",
@@ -868,7 +1060,7 @@ struct KanbanBoardView: View {
             return errorMessage
         }
 
-        if let summary = suggestion.webResearch?.summary, !summary.isEmpty {
+        if let summary = (suggestion.webResearch ?? researchStatus.fallbackResearch)?.summary, !summary.isEmpty {
             return summary
         }
 
@@ -876,15 +1068,15 @@ struct KanbanBoardView: View {
             return "Source-backed interview themes, likely questions, and links for this application."
         }
 
+        if !aiService.isAdvancedAIEnabled {
+            return "On-device AI prep is already active. Turn on Advanced AI in Settings only if you want public interview sources and live research."
+        }
+
         if !aiService.hasStoredGeminiAPIKey {
-            return "Add a Gemini API key in Settings to enable source-backed interview research."
+            return "Advanced AI is on, but no Gemini API key is saved yet. On-device AI prep is still available."
         }
 
-        if !aiService.isWebInterviewResearchEnabled {
-            return "Enable Web interview research in Settings to pull public interview signals."
-        }
-
-        return "Run research to pull public interview feedback and source links for this role."
+        return "Run live research to pull public interview feedback and source links for this role."
     }
 
     private func prepPreview(
@@ -1091,12 +1283,26 @@ private struct JobStageColumn: View {
 }
 
 private struct JobApplicationCard: View {
+    @EnvironmentObject private var jobStore: JobApplicationStore
+
     let application: JobApplication
     let tone: StatusTone
     let isSelected: Bool
     let onSelect: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+
+    private var daysInStage: Int {
+        jobStore.daysInStage(for: application)
+    }
+
+    private var isFollowUpDue: Bool {
+        jobStore.isFollowUpDue(application)
+    }
+
+    private var isStale: Bool {
+        jobStore.isStale(application)
+    }
 
     var body: some View {
         Button {
@@ -1124,8 +1330,21 @@ private struct JobApplicationCard: View {
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], alignment: .leading, spacing: 8) {
                     SmallChip(title: application.priority)
-                    SmallChip(title: application.statusNote)
+                    SmallChip(title: daysInStage == 0 ? "Today" : "\(daysInStage)d in stage")
+                    if isFollowUpDue {
+                        SmallChip(title: "Follow up")
+                    }
+                    if isStale {
+                        SmallChip(title: "Stale")
+                    }
                     SmallChip(title: application.location)
+                }
+
+                if !application.statusNote.isEmpty {
+                    Text(application.statusNote)
+                        .font(.caption)
+                        .foregroundStyle(AppPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(16)
@@ -1198,6 +1417,53 @@ private struct StageEditorSheet: View {
                         dismiss()
                     }
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+private struct WeeklyTargetSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let onSave: (Int) -> Void
+
+    @State private var target: Int
+
+    init(initialTarget: Int, onSave: @escaping (Int) -> Void) {
+        self.onSave = onSave
+        _target = State(initialValue: max(initialTarget, 1))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Stepper(value: $target, in: 1...30) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Weekly application target")
+                        Text("Set how many applications you want to send each week.")
+                            .font(.subheadline)
+                            .foregroundStyle(AppPalette.textSecondary)
+                    }
+                }
+
+                LabeledContent("Target", value: "\(target)")
+            }
+            .navigationTitle("Weekly Target")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(target)
+                        dismiss()
+                    }
                 }
             }
         }

@@ -163,6 +163,51 @@ struct JobStage: Identifiable, Codable, Hashable {
     }
 }
 
+enum JobTimelineEventKind: String, Codable, Hashable, CaseIterable {
+    case created
+    case stageChange
+    case followUp
+    case feedback
+    case statusUpdate
+
+    var symbol: String {
+        switch self {
+        case .created:
+            return "plus.circle.fill"
+        case .stageChange:
+            return "arrow.triangle.swap"
+        case .followUp:
+            return "paperplane.fill"
+        case .feedback:
+            return "quote.bubble.fill"
+        case .statusUpdate:
+            return "text.bubble.fill"
+        }
+    }
+}
+
+struct JobTimelineEvent: Identifiable, Codable, Hashable {
+    let id: UUID
+    var kind: JobTimelineEventKind
+    var date: Date
+    var title: String
+    var detail: String
+
+    init(
+        id: UUID = UUID(),
+        kind: JobTimelineEventKind,
+        date: Date = Date(),
+        title: String,
+        detail: String
+    ) {
+        self.id = id
+        self.kind = kind
+        self.date = date
+        self.title = title
+        self.detail = detail
+    }
+}
+
 struct JobApplication: Identifiable, Codable, Hashable {
     let id: UUID
     var companyName: String
@@ -174,10 +219,33 @@ struct JobApplication: Identifiable, Codable, Hashable {
     var priority: String
     var location: String
     var statusNote: String
+    var lastContactDate: Date?
+    var stageEnteredAt: Date
+    var timeline: [JobTimelineEvent]
     var tags: [String]
     var webInterviewResearch: WebInterviewResearch?
     var createdAt: Date
     var updatedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case companyName
+        case role
+        case stageID
+        case dateApplied
+        case notes
+        case feedback
+        case priority
+        case location
+        case statusNote
+        case lastContactDate
+        case stageEnteredAt
+        case timeline
+        case tags
+        case webInterviewResearch
+        case createdAt
+        case updatedAt
+    }
 
     init(
         id: UUID = UUID(),
@@ -190,6 +258,9 @@ struct JobApplication: Identifiable, Codable, Hashable {
         priority: String = "Standard",
         location: String = "Remote",
         statusNote: String = "Updated today",
+        lastContactDate: Date? = nil,
+        stageEnteredAt: Date? = nil,
+        timeline: [JobTimelineEvent] = [],
         tags: [String] = [],
         webInterviewResearch: WebInterviewResearch? = nil,
         createdAt: Date = Date(),
@@ -205,10 +276,63 @@ struct JobApplication: Identifiable, Codable, Hashable {
         self.priority = priority
         self.location = location
         self.statusNote = statusNote
+        self.lastContactDate = lastContactDate
+        self.stageEnteredAt = stageEnteredAt ?? dateApplied
+        self.timeline = timeline
         self.tags = tags
         self.webInterviewResearch = webInterviewResearch
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        companyName = try container.decode(String.self, forKey: .companyName)
+        role = try container.decode(String.self, forKey: .role)
+        stageID = try container.decode(UUID.self, forKey: .stageID)
+        dateApplied = try container.decode(Date.self, forKey: .dateApplied)
+        notes = try container.decode(String.self, forKey: .notes)
+        feedback = try container.decode(String.self, forKey: .feedback)
+        priority = try container.decode(String.self, forKey: .priority)
+        location = try container.decode(String.self, forKey: .location)
+        statusNote = try container.decode(String.self, forKey: .statusNote)
+        lastContactDate = try container.decodeIfPresent(Date.self, forKey: .lastContactDate)
+        stageEnteredAt = try container.decodeIfPresent(Date.self, forKey: .stageEnteredAt) ?? dateApplied
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+        webInterviewResearch = try container.decodeIfPresent(WebInterviewResearch.self, forKey: .webInterviewResearch)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? dateApplied
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        timeline = try container.decodeIfPresent([JobTimelineEvent].self, forKey: .timeline)
+            ?? [
+                JobTimelineEvent(
+                    kind: .created,
+                    date: createdAt,
+                    title: "Application created",
+                    detail: "Started tracking \(companyName) for \(role)."
+                )
+            ]
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(companyName, forKey: .companyName)
+        try container.encode(role, forKey: .role)
+        try container.encode(stageID, forKey: .stageID)
+        try container.encode(dateApplied, forKey: .dateApplied)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(feedback, forKey: .feedback)
+        try container.encode(priority, forKey: .priority)
+        try container.encode(location, forKey: .location)
+        try container.encode(statusNote, forKey: .statusNote)
+        try container.encode(lastContactDate, forKey: .lastContactDate)
+        try container.encode(stageEnteredAt, forKey: .stageEnteredAt)
+        try container.encode(timeline, forKey: .timeline)
+        try container.encode(tags, forKey: .tags)
+        try container.encode(webInterviewResearch, forKey: .webInterviewResearch)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
     }
 }
 
@@ -222,6 +346,7 @@ struct JobApplicationDraft {
     var priority: String
     var location: String
     var statusNote: String
+    var lastContactDate: Date?
     var tags: [String]
 
     init(
@@ -234,6 +359,7 @@ struct JobApplicationDraft {
         priority: String = "Standard",
         location: String = "Remote",
         statusNote: String = "Updated today",
+        lastContactDate: Date? = nil,
         tags: [String] = []
     ) {
         self.companyName = companyName
@@ -245,6 +371,7 @@ struct JobApplicationDraft {
         self.priority = priority
         self.location = location
         self.statusNote = statusNote
+        self.lastContactDate = lastContactDate
         self.tags = tags
     }
 
@@ -258,6 +385,7 @@ struct JobApplicationDraft {
         priority = application.priority
         location = application.location
         statusNote = application.statusNote
+        lastContactDate = application.lastContactDate
         tags = application.tags
     }
 }
@@ -536,10 +664,61 @@ struct DeletionTombstone: Identifiable, Codable, Hashable {
 struct JobStoreSnapshot: Codable {
     var stages: [JobStage]
     var applications: [JobApplication]
+    var weeklyApplicationTarget: Int
     var deletedStageTombstones: [DeletionTombstone]
     var deletedApplicationTombstones: [DeletionTombstone]
     var selectedApplicationID: UUID?
     var updatedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case stages
+        case applications
+        case weeklyApplicationTarget
+        case deletedStageTombstones
+        case deletedApplicationTombstones
+        case selectedApplicationID
+        case updatedAt
+    }
+
+    init(
+        stages: [JobStage],
+        applications: [JobApplication],
+        weeklyApplicationTarget: Int,
+        deletedStageTombstones: [DeletionTombstone],
+        deletedApplicationTombstones: [DeletionTombstone],
+        selectedApplicationID: UUID?,
+        updatedAt: Date
+    ) {
+        self.stages = stages
+        self.applications = applications
+        self.weeklyApplicationTarget = weeklyApplicationTarget
+        self.deletedStageTombstones = deletedStageTombstones
+        self.deletedApplicationTombstones = deletedApplicationTombstones
+        self.selectedApplicationID = selectedApplicationID
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        stages = try container.decode([JobStage].self, forKey: .stages)
+        applications = try container.decode([JobApplication].self, forKey: .applications)
+        weeklyApplicationTarget = max(try container.decodeIfPresent(Int.self, forKey: .weeklyApplicationTarget) ?? 5, 1)
+        deletedStageTombstones = try container.decode([DeletionTombstone].self, forKey: .deletedStageTombstones)
+        deletedApplicationTombstones = try container.decode([DeletionTombstone].self, forKey: .deletedApplicationTombstones)
+        selectedApplicationID = try container.decodeIfPresent(UUID.self, forKey: .selectedApplicationID)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(stages, forKey: .stages)
+        try container.encode(applications, forKey: .applications)
+        try container.encode(weeklyApplicationTarget, forKey: .weeklyApplicationTarget)
+        try container.encode(deletedStageTombstones, forKey: .deletedStageTombstones)
+        try container.encode(deletedApplicationTombstones, forKey: .deletedApplicationTombstones)
+        try container.encode(selectedApplicationID, forKey: .selectedApplicationID)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
 }
 
 struct ExpenseStoreSnapshot: Codable {
@@ -600,35 +779,43 @@ struct ExpenseDashboardSnapshot: Hashable {
     var totalSpent: Double
     var currentBalance: Double
     var observedExpenseDays: Int
+    var trackedCalendarDays: Int
     var threeDayAverage: Double
     var sevenDayAverage: Double
     var thirtyDayAverage: Double
     var weightedDailyBurnRate: Double
     var weeklySpending: Double
     var dailyBurnRate: Double
+    var activeDailySpendRate: Double
     var burnRateConfidence: BurnRateConfidence
     var spendingTrend: SpendingTrend
     var spendingAnomaly: SpendingAnomaly?
     var daysLeft: Int
     var projectedZeroDate: Date
     var sevenDayTrend: [DailyExpensePoint]
+    var spendingFrequency: Double
+    var spenderBehavior: SpenderBehavior
 
     static let empty = ExpenseDashboardSnapshot(
         totalSpent: 0,
         currentBalance: 0,
         observedExpenseDays: 0,
+        trackedCalendarDays: 0,
         threeDayAverage: 0,
         sevenDayAverage: 0,
         thirtyDayAverage: 0,
         weightedDailyBurnRate: 0,
         weeklySpending: 0,
         dailyBurnRate: 0,
+        activeDailySpendRate: 0,
         burnRateConfidence: .insufficient,
         spendingTrend: .stable,
         spendingAnomaly: nil,
         daysLeft: 0,
         projectedZeroDate: Date(),
-        sevenDayTrend: []
+        sevenDayTrend: [],
+        spendingFrequency: 0,
+        spenderBehavior: .mixed
     )
 }
 
@@ -736,6 +923,34 @@ enum BurnRateConfidence: String, Codable, Hashable {
     }
 }
 
+enum SpenderBehavior: String, Codable, Hashable {
+    case daily      // frequency > 0.7
+    case irregular  // frequency < 0.3
+    case mixed      // 0.3 ... 0.7
+
+    var title: String {
+        switch self {
+        case .daily:
+            return "Daily"
+        case .irregular:
+            return "Irregular"
+        case .mixed:
+            return "Mixed"
+        }
+    }
+
+    var displayLabel: String {
+        switch self {
+        case .daily:
+            return "daily pattern"
+        case .irregular:
+            return "irregular pattern"
+        case .mixed:
+            return "mixed pattern"
+        }
+    }
+}
+
 struct SpendingAnomaly: Hashable {
     var date: Date
     var amount: Double
@@ -746,25 +961,83 @@ struct SpendingAnomaly: Hashable {
 
 struct ExpenseInsightSnapshot: Hashable {
     var runwayState: RunwayInsightState
+    var observedExpenseDays: Int
+    var trackedCalendarDays: Int
+    var burnRateConfidence: BurnRateConfidence
+    var survivalDailyBurnRate: Double
+    var activeDailySpendRate: Double
     var spendingTrend: SpendingTrend
     var spendingAnomaly: SpendingAnomaly?
 
     static let empty = ExpenseInsightSnapshot(
         runwayState: .setup,
+        observedExpenseDays: 0,
+        trackedCalendarDays: 0,
+        burnRateConfidence: .insufficient,
+        survivalDailyBurnRate: 0,
+        activeDailySpendRate: 0,
         spendingTrend: .stable,
         spendingAnomaly: nil
     )
 }
 
+struct PipelineHealthSnapshot: Hashable {
+    var score: Int
+    var tone: StatusTone
+    var label: String
+    var message: String
+
+    static let empty = PipelineHealthSnapshot(
+        score: 0,
+        tone: .warning,
+        label: "Needs Build",
+        message: "Add more live applications and recent activity to strengthen the pipeline."
+    )
+}
+
+struct JobConversionSnapshot: Hashable {
+    var submittedApplicationsCount: Int
+    var interviewsReachedCount: Int
+    var offersReachedCount: Int
+    var applicationToInterviewRate: Int
+    var interviewToOfferRate: Int
+
+    static let empty = JobConversionSnapshot(
+        submittedApplicationsCount: 0,
+        interviewsReachedCount: 0,
+        offersReachedCount: 0,
+        applicationToInterviewRate: 0,
+        interviewToOfferRate: 0
+    )
+}
+
 struct JobDecisionSnapshot: Hashable {
+    var totalApplicationsCount: Int
     var activeApplicationsCount: Int
     var interviewCount: Int
     var offerCount: Int
+    var acceptedCount: Int
+    var weeklyApplicationTarget: Int
+    var weeklyApplicationsProgress: Int
+    var followUpDueCount: Int
+    var staleApplicationsCount: Int
+    var highPriorityStaleCount: Int
+    var pipelineHealth: PipelineHealthSnapshot
+    var conversions: JobConversionSnapshot
 
     static let empty = JobDecisionSnapshot(
+        totalApplicationsCount: 0,
         activeApplicationsCount: 0,
         interviewCount: 0,
-        offerCount: 0
+        offerCount: 0,
+        acceptedCount: 0,
+        weeklyApplicationTarget: 5,
+        weeklyApplicationsProgress: 0,
+        followUpDueCount: 0,
+        staleApplicationsCount: 0,
+        highPriorityStaleCount: 0,
+        pipelineHealth: .empty,
+        conversions: .empty
     )
 }
 
@@ -785,8 +1058,22 @@ struct EmploymentStatusSnapshot: Hashable {
 
 struct JobInsightSnapshot: Hashable {
     var jobsNeeded: Int
+    var weeklyApplicationTarget: Int
+    var weeklyApplicationsProgress: Int
+    var followUpDueCount: Int
+    var staleApplicationsCount: Int
+    var highPriorityStaleCount: Int
+    var pipelineHealthScore: Int
 
-    static let empty = JobInsightSnapshot(jobsNeeded: 10)
+    static let empty = JobInsightSnapshot(
+        jobsNeeded: 10,
+        weeklyApplicationTarget: 5,
+        weeklyApplicationsProgress: 0,
+        followUpDueCount: 0,
+        staleApplicationsCount: 0,
+        highPriorityStaleCount: 0,
+        pipelineHealthScore: 0
+    )
 }
 
 struct EmploymentFinancialSnapshot: Hashable {
@@ -802,6 +1089,8 @@ struct EmploymentFinancialSnapshot: Hashable {
     var stabilityTone: StatusTone
     var stabilityLabel: String
     var stabilityMessage: String
+    var spendingFrequency: Double
+    var spenderBehavior: SpenderBehavior
 
     static let empty = EmploymentFinancialSnapshot(
         monthlyIncome: 0,
@@ -815,7 +1104,9 @@ struct EmploymentFinancialSnapshot: Hashable {
         runwayIfUnemployedAgainDays: 0,
         stabilityTone: .warning,
         stabilityLabel: "Income Missing",
-        stabilityMessage: "Set your monthly take-home pay to switch from survival tracking into stability planning."
+        stabilityMessage: "Set your monthly take-home pay to switch from survival tracking into stability planning.",
+        spendingFrequency: 0,
+        spenderBehavior: .mixed
     )
 }
 
@@ -823,11 +1114,21 @@ struct JobAnalyticsSummary: Hashable {
     var pipelinePoints: [ApplicationStagePoint]
     var timeToHireEstimate: Int
     var hiringLikelihood: Int
+    var weeklyTargetProgress: Int
+    var weeklyTarget: Int
+    var staleApplicationsCount: Int
+    var followUpDueCount: Int
+    var conversions: JobConversionSnapshot
 
     static let empty = JobAnalyticsSummary(
         pipelinePoints: [],
         timeToHireEstimate: 12,
-        hiringLikelihood: 0
+        hiringLikelihood: 0,
+        weeklyTargetProgress: 0,
+        weeklyTarget: 5,
+        staleApplicationsCount: 0,
+        followUpDueCount: 0,
+        conversions: .empty
     )
 }
 
@@ -952,8 +1253,13 @@ struct GeminiResearchPreferenceSnapshot: Codable {
 struct InterviewResearchStatus: Hashable {
     var isLoading: Bool
     var errorMessage: String?
+    var fallbackResearch: WebInterviewResearch?
 
-    static let idle = InterviewResearchStatus(isLoading: false, errorMessage: nil)
+    static let idle = InterviewResearchStatus(
+        isLoading: false,
+        errorMessage: nil,
+        fallbackResearch: nil
+    )
 }
 
 enum AppDefaults {

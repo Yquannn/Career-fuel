@@ -21,8 +21,9 @@ final class AIInsightService: ObservableObject {
     private let persistence: PersistenceController
     private let jobStore: JobApplicationStore
     private let expenseStore: ExpenseStore
+    private let localAIEngine: LocalAIEngine
     private let apiKeyStore: GeminiAPIKeyStore
-    private let interviewResearchClient: GeminiInterviewResearchClient
+    private let interviewResearchClient: any ExternalInterviewResearchProviding
     private let insightDebounceInterval: RunLoop.SchedulerTimeType.Stride
     private var cancellables = Set<AnyCancellable>()
     private let researchPreferenceStorageKey = "careerfuel.ai.gemini.preferences.v1"
@@ -39,15 +40,15 @@ final class AIInsightService: ObservableObject {
         jobStore: JobApplicationStore,
         expenseStore: ExpenseStore,
         insightDebounceInterval: RunLoop.SchedulerTimeType.Stride = .milliseconds(400),
-        apiKeyStore: GeminiAPIKeyStore = GeminiAPIKeyStore(),
-        interviewResearchClient: GeminiInterviewResearchClient = GeminiInterviewResearchClient()
+        apiKeyStore: GeminiAPIKeyStore = GeminiAPIKeyStore()
     ) {
         self.persistence = persistence
         self.jobStore = jobStore
         self.expenseStore = expenseStore
         self.insightDebounceInterval = insightDebounceInterval
+        self.localAIEngine = LocalAIEngine()
         self.apiKeyStore = apiKeyStore
-        self.interviewResearchClient = interviewResearchClient
+        self.interviewResearchClient = GeminiInterviewResearchClient()
 
         let preferences = persistence.load(GeminiResearchPreferenceSnapshot.self, forKey: researchPreferenceStorageKey)
         isWebInterviewResearchEnabled = preferences?.isEnabled ?? false
@@ -99,21 +100,32 @@ final class AIInsightService: ObservableObject {
         isWebInterviewResearchEnabled && hasStoredGeminiAPIKey
     }
 
+    var isAdvancedAIEnabled: Bool {
+        isWebInterviewResearchEnabled
+    }
+
     var webInterviewResearchStatusMessage: String {
-        if !hasStoredGeminiAPIKey {
-            return "Add a Gemini API key to enable public interview research."
-        }
+        advancedAIStatusMessage
+    }
 
-        if isWebInterviewResearchEnabled {
-            return "Source-backed interview research is enabled. Refresh it from a job card when you want current public signals."
-        }
+    var advancedAIStatusMessage: String {
+        localAIEngine.advancedAIStatusMessage(
+            isAdvancedAIEnabled: isAdvancedAIEnabled,
+            hasStoredAPIKey: hasStoredGeminiAPIKey
+        )
+    }
 
-        return "Gemini API key is stored. Turn this on when you want live public interview research."
+    var advancedAIExplanation: String {
+        localAIEngine.advancedAIExplanation
     }
 
     func setWebInterviewResearchEnabled(_ isEnabled: Bool) {
         isWebInterviewResearchEnabled = isEnabled
         persistResearchPreferences()
+    }
+
+    func setAdvancedAIEnabled(_ isEnabled: Bool) {
+        setWebInterviewResearchEnabled(isEnabled)
     }
 
     func saveGeminiAPIKey(_ apiKey: String) -> String? {
@@ -154,10 +166,17 @@ final class AIInsightService: ObservableObject {
     }
 
     func refreshWebInterviewResearch(for applicationID: UUID) async {
+        guard let application = jobStore.applications.first(where: { $0.id == applicationID }) else {
+            return
+        }
+
+        let localFallbackResearch = fallbackInterviewResearch(for: application)
+
         guard isWebInterviewResearchEnabled else {
             interviewResearchStatuses[applicationID] = InterviewResearchStatus(
                 isLoading: false,
-                errorMessage: "Enable Gemini web interview research in Settings first."
+                errorMessage: localAIEngine.disabledAdvancedAIMessage,
+                fallbackResearch: localFallbackResearch
             )
             return
         }
@@ -166,28 +185,31 @@ final class AIInsightService: ObservableObject {
             hasStoredGeminiAPIKey = false
             interviewResearchStatuses[applicationID] = InterviewResearchStatus(
                 isLoading: false,
-                errorMessage: "Add a valid Gemini API key in Settings first."
+                errorMessage: localAIEngine.missingAPIKeyMessage,
+                fallbackResearch: localFallbackResearch
             )
             return
         }
 
-        guard let application = jobStore.applications.first(where: { $0.id == applicationID }) else {
-            return
-        }
-
-        interviewResearchStatuses[applicationID] = InterviewResearchStatus(isLoading: true, errorMessage: nil)
+        interviewResearchStatuses[applicationID] = InterviewResearchStatus(
+            isLoading: true,
+            errorMessage: nil,
+            fallbackResearch: nil
+        )
 
         do {
             let research = try await interviewResearchClient.fetchInterviewResearch(
                 for: application,
-                apiKey: apiKey
+                apiKey: apiKey,
+                model: "gemini-2.5-flash"
             )
             jobStore.updateWebInterviewResearch(id: applicationID, research: research)
             interviewResearchStatuses[applicationID] = .idle
         } catch {
             interviewResearchStatuses[applicationID] = InterviewResearchStatus(
                 isLoading: false,
-                errorMessage: error.localizedDescription
+                errorMessage: localAIEngine.fallbackFailureMessage(from: error),
+                fallbackResearch: localFallbackResearch
             )
         }
     }
@@ -376,6 +398,7 @@ final class AIInsightService: ObservableObject {
     ) -> [AISpendingAlert] {
         let currentWeekSpend = expenseStore.spendByCategory(inLastDays: 7)
         let budgetIndex = Dictionary(uniqueKeysWithValues: budgetRecommendations.map { ($0.category, $0.weeklyLimit) })
+        let expenseSnapshot = expenseStore.dashboardSnapshot
         var alerts: [AISpendingAlert] = []
 
         for category in ExpenseCategory.allCases {
@@ -403,6 +426,25 @@ final class AIInsightService: ObservableObject {
                     )
                 )
             }
+        }
+
+        if
+            expenseSnapshot.burnRateConfidence != .insufficient,
+            expenseSnapshot.trackedCalendarDays > expenseSnapshot.observedExpenseDays,
+            expenseSnapshot.dailyBurnRate > 0,
+            expenseSnapshot.activeDailySpendRate >= expenseSnapshot.dailyBurnRate * 1.35
+        {
+            alerts.append(
+                AISpendingAlert(
+                    id: "active-day-intensity",
+                    title: "Spend per active day is running hot",
+                    message: "You average \(expenseSnapshot.activeDailySpendRate.currencyString) on days you spend, versus \(expenseSnapshot.dailyBurnRate.currencyString) across all tracked days. Keep large transaction days tighter so they do not distort the next few weeks.",
+                    tone: expenseSnapshot.activeDailySpendRate >= expenseSnapshot.dailyBurnRate * 1.75 ? .danger : .warning,
+                    symbol: "speedometer",
+                    category: nil,
+                    dedupeKey: "active-day-intensity-\(Int(expenseSnapshot.activeDailySpendRate.rounded()))-\(Int(expenseSnapshot.dailyBurnRate.rounded()))"
+                )
+            )
         }
 
         let projectedShortfall = max((projectedWeeklySpend() / 7) - recommendedDailyBudget, 0) * Double(min(max(expenseStore.daysLeft, 7), 30))
@@ -609,6 +651,16 @@ final class AIInsightService: ObservableObject {
         }
 
         return "Keep your stories tight: context, decision, tradeoff, and measurable outcome."
+    }
+
+    private func fallbackInterviewResearch(for application: JobApplication) -> WebInterviewResearch {
+        let suggestion = jobSuggestions[application.id] ?? jobSuggestion(for: application)
+        let themes = semanticThemes(for: application, limit: 3)
+        return localAIEngine.buildFallbackResearch(
+            for: application,
+            suggestion: suggestion,
+            semanticThemes: themes
+        )
     }
 
     private func weeklyHistory(for category: ExpenseCategory, weeks: Int) -> [Double] {
@@ -977,6 +1029,66 @@ final class AIInsightService: ObservableObject {
 }
 
 private extension AIInsightService {
+    protocol ExternalInterviewResearchProviding {
+        func fetchInterviewResearch(
+            for application: JobApplication,
+            apiKey: String,
+            model: String
+        ) async throws -> WebInterviewResearch
+    }
+
+    struct LocalAIEngine {
+        let advancedAIExplanation = "CareerFuel already uses on-device AI for interview prep, spending alerts, and category suggestions. Advanced AI is optional and only adds live public interview research with source links."
+        let disabledAdvancedAIMessage = "Advanced AI is off right now. CareerFuel is using its on-device interview prep instead."
+        let missingAPIKeyMessage = "Advanced AI is enabled, but no Gemini API key is saved yet. CareerFuel is using on-device interview prep for now."
+
+        func advancedAIStatusMessage(
+            isAdvancedAIEnabled: Bool,
+            hasStoredAPIKey: Bool
+        ) -> String {
+            if !isAdvancedAIEnabled {
+                return "On-device AI is active by default. Turn this on only if you want live public interview research with source links."
+            }
+
+            if !hasStoredAPIKey {
+                return "Advanced AI is on, but it still needs a Gemini API key. The app continues using on-device AI until that is added."
+            }
+
+            return "Advanced AI is enabled. CareerFuel will try live public interview research and fall back to on-device AI if Gemini is unavailable."
+        }
+
+        func fallbackFailureMessage(from error: Error) -> String {
+            "Advanced AI could not load live research. CareerFuel kept using on-device interview prep instead. \(error.localizedDescription)"
+        }
+
+        func buildFallbackResearch(
+            for application: JobApplication,
+            suggestion: AIJobSuggestion,
+            semanticThemes: [String]
+        ) -> WebInterviewResearch {
+            let fallbackSignals = semanticThemes.map {
+                "Your saved notes and feedback emphasize \($0.lowercased())."
+            }
+
+            let summary: String
+            if let strongestTheme = semanticThemes.first {
+                summary = "Using on-device AI for now. Based on your notes and feedback, this role is leaning hardest on \(strongestTheme.lowercased())."
+            } else {
+                summary = "Using on-device AI for now. CareerFuel is basing interview prep on the role, your notes, and your saved feedback."
+            }
+
+            return WebInterviewResearch(
+                summary: summary,
+                hiringSignals: Array(fallbackSignals.prefix(3)),
+                likelyQuestions: Array(suggestion.interviewQuestions.prefix(4)),
+                preparationFocus: [suggestion.coachingTip],
+                sources: [],
+                generatedAt: Date(),
+                model: "On-device AI"
+            )
+        }
+    }
+
     struct ExpenseInsightInput: Hashable {
         let dashboardSnapshot: ExpenseDashboardSnapshot
         let analyticsSummary: ExpenseAnalyticsSummary
@@ -1057,3 +1169,5 @@ private extension Array where Element: Hashable {
         return filter { seen.insert($0).inserted }
     }
 }
+
+extension GeminiInterviewResearchClient: AIInsightService.ExternalInterviewResearchProviding {}

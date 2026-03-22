@@ -93,6 +93,10 @@ final class ExpenseStore: ObservableObject {
         dashboardSnapshot.dailyBurnRate
     }
 
+    var activeDailySpendRate: Double {
+        dashboardSnapshot.activeDailySpendRate
+    }
+
     var weightedDailyBurnRate: Double {
         dashboardSnapshot.weightedDailyBurnRate
     }
@@ -398,7 +402,7 @@ final class ExpenseStore: ObservableObject {
             relativeTo: normalizedReferenceDate,
             dailySpendLookup: dailySpendLookup
         )
-        let dailyBurnRate = adaptiveBurn.predictedDailyBurnRate
+        let dailyBurnRate = adaptiveBurn.survivalDailyBurnRate
         let daysLeft = dailyBurnRate > 0
             ? max(Int((currentBalance / dailyBurnRate).rounded(.down)), 0)
             : 0
@@ -420,12 +424,14 @@ final class ExpenseStore: ObservableObject {
             totalSpent: totalSpent,
             currentBalance: currentBalance,
             observedExpenseDays: adaptiveBurn.observedExpenseDays,
+            trackedCalendarDays: adaptiveBurn.trackedCalendarDays,
             threeDayAverage: adaptiveBurn.threeDayAverage,
             sevenDayAverage: adaptiveBurn.sevenDayAverage,
             thirtyDayAverage: adaptiveBurn.thirtyDayAverage,
             weightedDailyBurnRate: adaptiveBurn.weightedDailyBurnRate,
             weeklySpending: weeklySpending,
             dailyBurnRate: dailyBurnRate,
+            activeDailySpendRate: adaptiveBurn.activeDailySpendRate,
             burnRateConfidence: adaptiveBurn.confidence,
             spendingTrend: adaptiveBurn.trend,
             spendingAnomaly: adaptiveBurn.anomaly,
@@ -434,7 +440,9 @@ final class ExpenseStore: ObservableObject {
             sevenDayTrend: computeSevenDayTrend(
                 relativeTo: normalizedReferenceDate,
                 dailySpendLookup: dailySpendLookup
-            )
+            ),
+            spendingFrequency: monthlyProjection.spendingFrequency,
+            spenderBehavior: monthlyProjection.spenderBehavior
         )
 
         let nextAnalyticsSummary = ExpenseAnalyticsSummary(
@@ -453,7 +461,9 @@ final class ExpenseStore: ObservableObject {
             savingsRate: savingsRate,
             emergencyFundTarget: emergencyFundTarget,
             emergencyFundProgress: emergencyFundProgress,
-            runwayIfUnemployedAgainDays: runwayIfUnemployedAgainDays
+            runwayIfUnemployedAgainDays: runwayIfUnemployedAgainDays,
+            spendingFrequency: monthlyProjection.spendingFrequency,
+            spenderBehavior: monthlyProjection.spenderBehavior
         )
 
         if dashboardSnapshot != nextDashboardSnapshot {
@@ -488,6 +498,11 @@ final class ExpenseStore: ObservableObject {
 
         return ExpenseInsightSnapshot(
             runwayState: runwayState,
+            observedExpenseDays: dashboardSnapshot.observedExpenseDays,
+            trackedCalendarDays: dashboardSnapshot.trackedCalendarDays,
+            burnRateConfidence: dashboardSnapshot.burnRateConfidence,
+            survivalDailyBurnRate: dashboardSnapshot.dailyBurnRate,
+            activeDailySpendRate: dashboardSnapshot.activeDailySpendRate,
             spendingTrend: dashboardSnapshot.spendingTrend,
             spendingAnomaly: dashboardSnapshot.spendingAnomaly
         )
@@ -502,7 +517,9 @@ final class ExpenseStore: ObservableObject {
         savingsRate: Double,
         emergencyFundTarget: Double,
         emergencyFundProgress: Double,
-        runwayIfUnemployedAgainDays: Int
+        runwayIfUnemployedAgainDays: Int,
+        spendingFrequency: Double,
+        spenderBehavior: SpenderBehavior
     ) -> EmploymentFinancialSnapshot {
         let stabilityTone: StatusTone
         let stabilityLabel: String
@@ -590,7 +607,9 @@ final class ExpenseStore: ObservableObject {
             runwayIfUnemployedAgainDays: normalizedRunwayIfUnemployedAgainDays,
             stabilityTone: stabilityTone,
             stabilityLabel: stabilityLabel,
-            stabilityMessage: stabilityMessage
+            stabilityMessage: stabilityMessage,
+            spendingFrequency: spendingFrequency,
+            spenderBehavior: spenderBehavior
         )
     }
 
@@ -672,24 +691,36 @@ final class ExpenseStore: ObservableObject {
         relativeTo referenceDate: Date,
         dailySpendLookup: [Date: Double]
     ) -> AdaptiveBurnComputation {
-        let observedExpenseDays = dailySpendLookup.keys
-            .filter { $0 <= referenceDate }
-            .count
+        let observedPoints = dailySpendLookup
+            .filter { $0.key <= referenceDate && $0.value > 0 }
+            .map { DailyExpensePoint(date: $0.key, amount: $0.value) }
+            .sorted { lhs, rhs in lhs.date > rhs.date }
+        let observedExpenseDays = observedPoints.count
+        let trackedCalendarDays = calendarDaysTracked(
+            from: observedPoints.last?.date,
+            to: referenceDate
+        )
         let confidence = burnRateConfidence(for: observedExpenseDays)
 
         guard observedExpenseDays > 0 else {
             return AdaptiveBurnComputation(
                 observedExpenseDays: 0,
+                trackedCalendarDays: 0,
                 confidence: .insufficient,
+                survivalDailyBurnRate: 0,
+                activeDailySpendRate: 0,
                 threeDayAverage: 0,
                 sevenDayAverage: 0,
                 thirtyDayAverage: 0,
                 weightedDailyBurnRate: 0,
-                predictedDailyBurnRate: 0,
                 trend: .stable,
                 anomaly: nil
             )
         }
+
+        let totalObservedSpend = observedPoints.reduce(0) { $0 + $1.amount }
+        let activeDailySpendRate = totalObservedSpend / Double(max(observedExpenseDays, 1))
+        let survivalDailyBurnRate = totalObservedSpend / Double(max(trackedCalendarDays, 1))
 
         let threeDayAverage = recentSpendingDayAverage(
             spendingDayLimit: 3,
@@ -720,23 +751,24 @@ final class ExpenseStore: ObservableObject {
                 thirtyDayAverage: thirtyDayAverage
             )
             : .stable
-        let predictedDailyBurnRate = max(weightedDailyBurnRate * trend.predictiveAdjustmentMultiplier, 0)
         let anomaly = detectSpendingAnomaly(
             relativeTo: referenceDate,
             dailySpendLookup: dailySpendLookup,
             sevenDayAverage: sevenDayAverage,
             thirtyDayAverage: thirtyDayAverage,
-            predictedDailyBurnRate: predictedDailyBurnRate
+            activeDailySpendRate: activeDailySpendRate
         )
 
         return AdaptiveBurnComputation(
             observedExpenseDays: observedExpenseDays,
+            trackedCalendarDays: trackedCalendarDays,
             confidence: confidence,
+            survivalDailyBurnRate: survivalDailyBurnRate,
+            activeDailySpendRate: activeDailySpendRate,
             threeDayAverage: threeDayAverage,
             sevenDayAverage: sevenDayAverage,
             thirtyDayAverage: thirtyDayAverage,
             weightedDailyBurnRate: weightedDailyBurnRate,
-            predictedDailyBurnRate: predictedDailyBurnRate,
             trend: trend,
             anomaly: anomaly
         )
@@ -766,7 +798,7 @@ final class ExpenseStore: ObservableObject {
         dailySpendLookup: [Date: Double],
         sevenDayAverage: Double,
         thirtyDayAverage: Double,
-        predictedDailyBurnRate: Double
+        activeDailySpendRate: Double
     ) -> SpendingAnomaly? {
         let recentPoints = dailySpendPoints(
             inLastDays: 3,
@@ -800,7 +832,7 @@ final class ExpenseStore: ObservableObject {
         let baseline = max(thirtyDayAverage, 1)
         let threshold = max(
             baseline * 2.4,
-            max(sevenDayAverage * 1.9, predictedDailyBurnRate * 1.75),
+            max(sevenDayAverage * 1.9, activeDailySpendRate * 1.75),
             baseline + max(deviation * 1.8, 250)
         )
 
@@ -885,6 +917,7 @@ final class ExpenseStore: ObservableObject {
         relativeTo referenceDate: Date,
         dailySpendLookup: [Date: Double]
     ) -> MonthlyProjectionComputation {
+        let calendar = Calendar.current
         let recentPoints = calendarDaySpendPoints(
             inLastDays: 30,
             relativeTo: referenceDate,
@@ -892,25 +925,74 @@ final class ExpenseStore: ObservableObject {
         )
         let observedPoints = recentPoints.filter { $0.amount > 0 }
         let observedDays = observedPoints.count
+        let calendarDays = recentPoints.count
 
         guard observedDays > 0 else {
             return MonthlyProjectionComputation(
                 observedDays: 0,
                 confidence: .insufficient,
                 dailyProjection: 0,
-                monthlyExpenseEstimate: 0
+                monthlyExpenseEstimate: 0,
+                spendingFrequency: 0,
+                spenderBehavior: .mixed
             )
         }
 
         let total = observedPoints.reduce(0) { $0 + $1.amount }
-        let dailyProjection = total / Double(observedDays)
+        let (frequency, behavior) = detectSpenderBehavior(
+            observedExpenseDays: observedDays,
+            trackedCalendarDays: calendarDays
+        )
+
+        let daysInCurrentMonth = Double(
+            calendar.range(of: .day, in: .month, for: referenceDate)?.count ?? 30
+        )
+
+        let monthlyEstimate: Double
+        let dailyProjection: Double
+
+        switch behavior {
+        case .daily:
+            // Spread over calendar days since spending is nearly every day
+            dailyProjection = total / Double(max(calendarDays, 1))
+            monthlyEstimate = dailyProjection * 30
+        case .irregular:
+            // Total already represents the month's spend for infrequent spenders
+            monthlyEstimate = total
+            dailyProjection = total / daysInCurrentMonth
+        case .mixed:
+            // Blended: average per calendar day × days in this month
+            dailyProjection = total / Double(max(calendarDays, 1))
+            monthlyEstimate = dailyProjection * daysInCurrentMonth
+        }
 
         return MonthlyProjectionComputation(
             observedDays: observedDays,
             confidence: monthlyProjectionConfidence(for: observedDays),
             dailyProjection: dailyProjection,
-            monthlyExpenseEstimate: dailyProjection * 30
+            monthlyExpenseEstimate: monthlyEstimate,
+            spendingFrequency: frequency,
+            spenderBehavior: behavior
         )
+    }
+
+    private func detectSpenderBehavior(
+        observedExpenseDays: Int,
+        trackedCalendarDays: Int
+    ) -> (frequency: Double, behavior: SpenderBehavior) {
+        guard trackedCalendarDays > 0 else {
+            return (0, .mixed)
+        }
+
+        let frequency = Double(observedExpenseDays) / Double(trackedCalendarDays)
+
+        if frequency > 0.7 {
+            return (frequency, .daily)
+        } else if frequency < 0.3 {
+            return (frequency, .irregular)
+        } else {
+            return (frequency, .mixed)
+        }
     }
 
     private func monthlyProjectionConfidence(for observedDays: Int) -> BurnRateConfidence {
@@ -980,6 +1062,15 @@ final class ExpenseStore: ObservableObject {
             partialResult + pow(value - mean, 2)
         } / Double(values.count)
         return sqrt(variance)
+    }
+
+    private func calendarDaysTracked(from oldestObservedDate: Date?, to referenceDate: Date) -> Int {
+        guard let oldestObservedDate else { return 0 }
+        let calendar = Calendar.current
+        let normalizedOldestDate = calendar.startOfDay(for: oldestObservedDate)
+        let normalizedReferenceDate = calendar.startOfDay(for: referenceDate)
+        let daySpan = calendar.dateComponents([.day], from: normalizedOldestDate, to: normalizedReferenceDate).day ?? 0
+        return max(daySpan + 1, 1)
     }
 
     private func normalized(_ value: String, fallback: String) -> String {
@@ -1176,12 +1267,14 @@ final class ExpenseStore: ObservableObject {
 private extension ExpenseStore {
     struct AdaptiveBurnComputation {
         let observedExpenseDays: Int
+        let trackedCalendarDays: Int
         let confidence: BurnRateConfidence
+        let survivalDailyBurnRate: Double
+        let activeDailySpendRate: Double
         let threeDayAverage: Double
         let sevenDayAverage: Double
         let thirtyDayAverage: Double
         let weightedDailyBurnRate: Double
-        let predictedDailyBurnRate: Double
         let trend: SpendingTrend
         let anomaly: SpendingAnomaly?
     }
@@ -1191,6 +1284,8 @@ private extension ExpenseStore {
         let confidence: BurnRateConfidence
         let dailyProjection: Double
         let monthlyExpenseEstimate: Double
+        let spendingFrequency: Double
+        let spenderBehavior: SpenderBehavior
     }
 
     struct LegacySnapshot: Codable {

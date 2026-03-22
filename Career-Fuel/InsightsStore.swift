@@ -363,8 +363,50 @@ final class InsightsStore: ObservableObject {
             )
         }
 
+        if jobSnapshot.highPriorityStaleCount > 0 {
+            nextInsights.append(
+                DashboardInsight(
+                    id: "high-priority-follow-up",
+                    title: "High-priority roles need follow-up",
+                    message: "\(jobSnapshot.highPriorityStaleCount) high-priority application\(jobSnapshot.highPriorityStaleCount == 1 ? " has" : "s have") gone quiet. Reach back out before they drift further.",
+                    tone: .warning,
+                    symbol: "flag.fill",
+                    priority: "Priority"
+                )
+            )
+        } else if jobSnapshot.followUpDueCount > 0 {
+            nextInsights.append(
+                DashboardInsight(
+                    id: "follow-up-due",
+                    title: "Follow-ups are due",
+                    message: "\(jobSnapshot.followUpDueCount) application\(jobSnapshot.followUpDueCount == 1 ? " is" : "s are") ready for a follow-up. Fresh activity keeps the pipeline from going stale.",
+                    tone: .info,
+                    symbol: "paperplane.fill",
+                    priority: "Follow-up"
+                )
+            )
+        }
+
+        if let intensityInsight = spendIntensityInsight(for: expenseSnapshot, mode: .jobSearch) {
+            nextInsights.append(intensityInsight)
+        }
+
         if let trendInsight = trendInsight(for: expenseSnapshot.spendingTrend, mode: .jobSearch) {
             nextInsights.append(trendInsight)
+        }
+
+        if jobSnapshot.weeklyApplicationsProgress < jobSnapshot.weeklyApplicationTarget {
+            let remaining = jobSnapshot.weeklyApplicationTarget - jobSnapshot.weeklyApplicationsProgress
+            nextInsights.append(
+                DashboardInsight(
+                    id: "weekly-target",
+                    title: "Keep the weekly application target moving",
+                    message: "You’re at \(jobSnapshot.weeklyApplicationsProgress) of \(jobSnapshot.weeklyApplicationTarget) applications this week. Add \(remaining) more to stay on pace.",
+                    tone: remaining <= 2 ? .info : .warning,
+                    symbol: "target",
+                    priority: "Target"
+                )
+            )
         }
 
         if jobSnapshot.jobsNeeded > 0 {
@@ -540,6 +582,10 @@ final class InsightsStore: ObservableObject {
             )
         }
 
+        if let intensityInsight = spendIntensityInsight(for: input.expenseSnapshot, mode: .employed) {
+            nextInsights.append(intensityInsight)
+        }
+
         if let trendInsight = trendInsight(for: input.expenseSnapshot.spendingTrend, mode: .employed) {
             nextInsights.append(trendInsight)
         }
@@ -604,7 +650,7 @@ final class InsightsStore: ObservableObject {
     ) -> String {
         switch trend {
         case .increasing:
-            return "\(base) Recent spend is trending up, so the predicted burn rate is carrying a safety premium."
+            return "\(base) Recent spend is trending up on your active transaction days, so keep the next few days disciplined."
         case .decreasing:
             return "\(base) Recent spend is cooling, so the forecast is giving some runway back."
         case .stable:
@@ -621,7 +667,7 @@ final class InsightsStore: ObservableObject {
             return DashboardInsight(
                 id: "trend-job-search-increasing",
                 title: "Spending trend is rising",
-                message: "The last 3 days are running hotter than your 7- and 30-day pace. The app is predicting burn upward to avoid overstating runway.",
+                message: "The last 3 active spend days are running hotter than your 7- and 30-day pace. If that repeats, runway will tighten quickly.",
                 tone: .warning,
                 symbol: trend.symbol,
                 priority: "Trend"
@@ -655,6 +701,47 @@ final class InsightsStore: ObservableObject {
             )
         case (_, .stable):
             return nil
+        }
+    }
+
+    private func spendIntensityInsight(
+        for snapshot: ExpenseInsightSnapshot,
+        mode: AppMode
+    ) -> DashboardInsight? {
+        guard
+            snapshot.burnRateConfidence != .insufficient,
+            snapshot.observedExpenseDays > 0,
+            snapshot.trackedCalendarDays > snapshot.observedExpenseDays,
+            snapshot.survivalDailyBurnRate > 0
+        else {
+            return nil
+        }
+
+        let intensityRatio = snapshot.activeDailySpendRate / snapshot.survivalDailyBurnRate
+        guard intensityRatio >= 1.35 else { return nil }
+
+        let activeSpend = snapshot.activeDailySpendRate.currencyString
+        let survivalSpend = snapshot.survivalDailyBurnRate.currencyString
+
+        switch mode {
+        case .jobSearch:
+            return DashboardInsight(
+                id: "spend-intensity-job-search",
+                title: "Spend intensity is high on active days",
+                message: "You average \(activeSpend) on days you spend, versus \(survivalSpend) across all tracked days. One heavy day can erase runway faster than the headline average suggests.",
+                tone: intensityRatio >= 1.75 ? .warning : .info,
+                symbol: "flame.fill",
+                priority: "Behavior"
+            )
+        case .employed:
+            return DashboardInsight(
+                id: "spend-intensity-employed",
+                title: "Watch large spend days",
+                message: "Your active spend days average \(activeSpend), while your full-day average is \(survivalSpend). Keep big transaction days from becoming the new baseline.",
+                tone: intensityRatio >= 1.75 ? .warning : .info,
+                symbol: "chart.line.uptrend.xyaxis",
+                priority: "Behavior"
+            )
         }
     }
 

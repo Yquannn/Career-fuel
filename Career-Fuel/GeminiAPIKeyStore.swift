@@ -7,7 +7,13 @@ struct GeminiAPIKeyStore {
 
     func save(_ apiKey: String) throws {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmedKey.data(using: .utf8), !trimmedKey.isEmpty else {
+        let sanitizedKey = trimmedKey.replacingOccurrences(of: " ", with: "")
+        guard
+            !sanitizedKey.isEmpty,
+            sanitizedKey.hasPrefix("AIza"),
+            sanitizedKey.count >= 24,
+            let data = sanitizedKey.data(using: .utf8)
+        else {
             throw GeminiAPIKeyStoreError.invalidKey
         }
 
@@ -76,7 +82,7 @@ enum GeminiAPIKeyStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidKey:
-            return "Enter a valid Gemini API key."
+            return "Enter a valid Gemini API key. Gemini keys usually start with AIza."
         case let .unhandledStatus(status):
             return "The API key could not be stored securely. Keychain status: \(status)."
         }

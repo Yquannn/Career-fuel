@@ -18,91 +18,103 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             SectionHeader(
                 title: "Settings",
-                subtitle: "Manage local testing preferences, Gemini interview research, and smart alerts. Cloud sync is disabled in this build."
+                subtitle: "Manage local testing preferences, optional advanced AI, and smart alerts. Cloud sync is disabled in this build."
             )
 
             SurfaceCard {
                 VStack(alignment: .leading, spacing: 18) {
                     settingsRow(
-                        title: "Web interview research",
-                        subtitle: aiService.webInterviewResearchStatusMessage,
-                        symbol: "network"
+                        title: "Enable advanced AI (optional)",
+                        subtitle: aiService.advancedAIStatusMessage,
+                        symbol: "sparkles"
                     ) {
                         Toggle(
                             "",
                             isOn: Binding(
-                                get: { aiService.isWebInterviewResearchEnabled },
-                                set: { aiService.setWebInterviewResearchEnabled($0) }
+                                get: { aiService.isAdvancedAIEnabled },
+                                set: { aiService.setAdvancedAIEnabled($0) }
                             )
                         )
                         .labelsHidden()
                         .tint(AppPalette.primary)
                     }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Gemini API key")
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(AppPalette.textPrimary)
+                    Text(aiService.advancedAIExplanation)
+                        .font(.subheadline)
+                        .foregroundStyle(AppPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                        SecureField(
-                            aiService.hasStoredGeminiAPIKey
-                                ? "Stored securely. Paste a new key to replace it."
-                                : "AIza...",
-                            text: $geminiAPIKeyInput
-                        )
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(AppPalette.surfaceSecondary)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(AppPalette.border, lineWidth: 1)
-                        )
+                    if aiService.isAdvancedAIEnabled {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Gemini API key")
+                                .font(.headline.weight(.semibold))
+                                .foregroundStyle(AppPalette.textPrimary)
 
-                        HStack(spacing: 12) {
-                            Button(aiService.hasStoredGeminiAPIKey ? "Update Key" : "Save Key") {
-                                handleSaveGeminiAPIKey()
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(geminiAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 11)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(AppPalette.primary)
+                            SecureField(
+                                aiService.hasStoredGeminiAPIKey
+                                    ? "Stored securely. Paste a new key to replace it."
+                                    : "AIza...",
+                                text: $geminiAPIKeyInput
                             )
-                            .foregroundStyle(.white)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(AppPalette.surfaceSecondary)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(AppPalette.border, lineWidth: 1)
+                            )
 
-                            if aiService.hasStoredGeminiAPIKey {
-                                Button("Remove Key", role: .destructive) {
-                                    handleRemoveGeminiAPIKey()
+                            HStack(spacing: 12) {
+                                Button(aiService.hasStoredGeminiAPIKey ? "Update Key" : "Save Key") {
+                                    handleSaveGeminiAPIKey()
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(geminiAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 11)
                                 .background(
                                     Capsule(style: .continuous)
-                                        .fill(AppPalette.danger.opacity(0.14))
+                                        .fill(AppPalette.primary)
                                 )
-                                .foregroundStyle(AppPalette.danger)
+                                .foregroundStyle(.white)
+
+                                if aiService.hasStoredGeminiAPIKey {
+                                    Button("Remove Key", role: .destructive) {
+                                        handleRemoveGeminiAPIKey()
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 11)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(AppPalette.danger.opacity(0.14))
+                                    )
+                                    .foregroundStyle(AppPalette.danger)
+                                }
+                            }
+
+                            Text("Advanced AI uses the Gemini Developer API with Google Search grounding to pull public interview feedback and attach source-backed questions to each saved job.")
+                                .font(.subheadline)
+                                .foregroundStyle(AppPalette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            if let geminiMessage {
+                                Label(geminiMessage, systemImage: geminiMessageTone == .danger ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                                    .font(.subheadline)
+                                    .foregroundStyle(geminiMessageTone.color)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
-
-                        Text("CareerFuel uses the Gemini Developer API with Google Search grounding to pull public interview feedback and attach source-backed questions to each saved job.")
+                    } else {
+                        Label("On-device AI is already active. You only need Gemini if you want live public interview research with source links.", systemImage: "brain.head.profile")
                             .font(.subheadline)
                             .foregroundStyle(AppPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
-
-                        if let geminiMessage {
-                            Label(geminiMessage, systemImage: geminiMessageTone == .danger ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                                .font(.subheadline)
-                                .foregroundStyle(geminiMessageTone.color)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
                     }
                 }
             }
@@ -215,7 +227,7 @@ struct SettingsView: View {
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(AppPalette.textPrimary)
 
-                    Text("Clear all jobs, expenses, local notification state, local sync preferences, and locally stored Gemini research settings on this device.")
+                    Text("Clear all jobs, expenses, local notification state, local sync preferences, and locally stored advanced AI settings on this device.")
                         .font(.subheadline)
                         .foregroundStyle(AppPalette.textSecondary)
 
@@ -251,7 +263,7 @@ struct SettingsView: View {
                 }
             }
         } message: {
-            Text("This removes locally stored jobs, expenses, smart alert history, Gemini research settings, and local sync preferences from this device.")
+            Text("This removes locally stored jobs, expenses, smart alert history, advanced AI settings, and local sync preferences from this device.")
         }
         .task {
             reminderTime = notificationManager.dailyReminderTime

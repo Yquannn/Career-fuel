@@ -15,6 +15,7 @@ final class JobApplicationStore: ObservableObject {
     private let defaults: UserDefaults
     private let storageKey = "careerfuel.jobstore.snapshot.v3"
     private let legacyStorageKey = "careerfuel.jobstore.snapshot"
+    private var weeklyApplicationTargetValue: Int
 
     private var deletedStageTombstones: [DeletionTombstone]
     private var deletedApplicationTombstones: [DeletionTombstone]
@@ -38,6 +39,7 @@ final class JobApplicationStore: ObservableObject {
         employmentSnapshot = .empty
         insightSnapshot = .empty
         analyticsSummary = .empty
+        weeklyApplicationTargetValue = 5
         deletedStageTombstones = []
         deletedApplicationTombstones = []
         snapshotUpdatedAt = Date()
@@ -54,6 +56,7 @@ final class JobApplicationStore: ObservableObject {
         {
             stages = normalizedStages(snapshot.stages)
             applications = snapshot.applications
+            weeklyApplicationTargetValue = max(snapshot.weeklyApplicationTarget, 1)
             deletedStageTombstones = snapshot.deletedStageTombstones
             deletedApplicationTombstones = snapshot.deletedApplicationTombstones
             selectedApplicationID = snapshot.selectedApplicationID
@@ -64,6 +67,7 @@ final class JobApplicationStore: ObservableObject {
         {
             stages = normalizedStages(migrated.stages)
             applications = migrated.applications
+            weeklyApplicationTargetValue = max(migrated.weeklyApplicationTarget, 1)
             deletedStageTombstones = migrated.deletedStageTombstones
             deletedApplicationTombstones = migrated.deletedApplicationTombstones
             selectedApplicationID = migrated.selectedApplicationID
@@ -72,6 +76,7 @@ final class JobApplicationStore: ObservableObject {
         } else {
             stages = AppDefaults.defaultStages
             applications = []
+            weeklyApplicationTargetValue = 5
             deletedStageTombstones = []
             deletedApplicationTombstones = []
             selectedApplicationID = nil
@@ -103,12 +108,41 @@ final class JobApplicationStore: ObservableObject {
         decisionSnapshot.offerCount
     }
 
+    var weeklyApplicationTarget: Int {
+        decisionSnapshot.weeklyApplicationTarget
+    }
+
     func stage(for id: UUID) -> JobStage? {
         stageLookup[id]
     }
 
     func applications(in stage: JobStage) -> [JobApplication] {
         applicationsByStageCache[stage.id] ?? []
+    }
+
+    func application(for id: UUID) -> JobApplication? {
+        applicationLookup[id]
+    }
+
+    func daysInStage(for application: JobApplication, referenceDate: Date = Date()) -> Int {
+        max(Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: application.stageEnteredAt), to: Calendar.current.startOfDay(for: referenceDate)).day ?? 0, 0)
+    }
+
+    func daysSinceLastContact(for application: JobApplication, referenceDate: Date = Date()) -> Int? {
+        guard let lastContactDate = application.lastContactDate else { return nil }
+        return max(Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: lastContactDate), to: Calendar.current.startOfDay(for: referenceDate)).day ?? 0, 0)
+    }
+
+    func recommendedFollowUpDate(for application: JobApplication, referenceDate: Date = Date()) -> Date? {
+        recommendedFollowUpDate(for: application, stageLookup: stageLookup, referenceDate: referenceDate)
+    }
+
+    func isStale(_ application: JobApplication, referenceDate: Date = Date()) -> Bool {
+        isApplicationStale(application, stageLookup: stageLookup, referenceDate: referenceDate)
+    }
+
+    func isFollowUpDue(_ application: JobApplication, referenceDate: Date = Date()) -> Bool {
+        isFollowUpDue(application, stageLookup: stageLookup, referenceDate: referenceDate)
     }
 
     func selectApplication(_ id: UUID?) {
@@ -118,18 +152,36 @@ final class JobApplicationStore: ObservableObject {
     }
 
     func add(_ draft: JobApplicationDraft) {
+        let normalizedCompany = normalized(draft.companyName, fallback: "New Company")
+        let normalizedRole = normalized(draft.role, fallback: "New Role")
+        let normalizedPriority = normalized(draft.priority, fallback: "Standard")
+        let normalizedLocation = normalized(draft.location, fallback: "Remote")
+        let normalizedStatusNote = normalized(draft.statusNote, fallback: "Updated today")
+        let stageTitle = stage(for: draft.stageID)?.title ?? "Pipeline"
+        let createdAt = Date()
         let application = JobApplication(
-            companyName: normalized(draft.companyName, fallback: "New Company"),
-            role: normalized(draft.role, fallback: "New Role"),
+            companyName: normalizedCompany,
+            role: normalizedRole,
             stageID: draft.stageID,
             dateApplied: draft.dateApplied,
             notes: draft.notes.trimmingCharacters(in: .whitespacesAndNewlines),
             feedback: draft.feedback.trimmingCharacters(in: .whitespacesAndNewlines),
-            priority: normalized(draft.priority, fallback: "Standard"),
-            location: normalized(draft.location, fallback: "Remote"),
-            statusNote: normalized(draft.statusNote, fallback: "Updated today"),
+            priority: normalizedPriority,
+            location: normalizedLocation,
+            statusNote: normalizedStatusNote,
+            lastContactDate: draft.lastContactDate,
+            stageEnteredAt: draft.dateApplied,
+            timeline: buildInitialTimeline(
+                companyName: normalizedCompany,
+                role: normalizedRole,
+                stageTitle: stageTitle,
+                dateApplied: draft.dateApplied,
+                lastContactDate: draft.lastContactDate
+            ),
             tags: normalizedTags(draft.tags),
-            webInterviewResearch: nil
+            webInterviewResearch: nil,
+            createdAt: createdAt,
+            updatedAt: createdAt
         )
 
         applications.append(application)
@@ -141,6 +193,7 @@ final class JobApplicationStore: ObservableObject {
     func resetLocalData() {
         stages = AppDefaults.defaultStages
         applications = []
+        weeklyApplicationTargetValue = 5
         deletedStageTombstones = []
         deletedApplicationTombstones = []
         selectedApplicationID = nil
@@ -153,15 +206,26 @@ final class JobApplicationStore: ObservableObject {
     func edit(id: UUID, with draft: JobApplicationDraft) {
         guard let index = applications.firstIndex(where: { $0.id == id }) else { return }
 
+        let previousApplication = applications[index]
         let normalizedCompany = normalized(draft.companyName, fallback: applications[index].companyName)
         let normalizedRole = normalized(draft.role, fallback: applications[index].role)
         let trimmedNotes = draft.notes.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedFeedback = draft.feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedPriority = normalized(draft.priority, fallback: "Standard")
+        let normalizedLocation = normalized(draft.location, fallback: "Remote")
+        let normalizedStatusNote = normalized(draft.statusNote, fallback: "Updated today")
+        let previousStageTitle = stage(for: previousApplication.stageID)?.title ?? "Previous stage"
+        let nextStageTitle = stage(for: draft.stageID)?.title ?? "Pipeline"
+        let now = Date()
         let shouldInvalidateResearch =
             normalizedCompany != applications[index].companyName ||
             normalizedRole != applications[index].role ||
             trimmedNotes != applications[index].notes ||
             trimmedFeedback != applications[index].feedback
+        let didStageChange = draft.stageID != previousApplication.stageID
+        let didContactChange = draft.lastContactDate != previousApplication.lastContactDate
+        let didFeedbackChange = trimmedFeedback != previousApplication.feedback
+        let didStatusChange = normalizedStatusNote != previousApplication.statusNote
 
         applications[index].companyName = normalizedCompany
         applications[index].role = normalizedRole
@@ -169,14 +233,29 @@ final class JobApplicationStore: ObservableObject {
         applications[index].dateApplied = draft.dateApplied
         applications[index].notes = trimmedNotes
         applications[index].feedback = trimmedFeedback
-        applications[index].priority = normalized(draft.priority, fallback: "Standard")
-        applications[index].location = normalized(draft.location, fallback: "Remote")
-        applications[index].statusNote = normalized(draft.statusNote, fallback: "Updated today")
+        applications[index].priority = normalizedPriority
+        applications[index].location = normalizedLocation
+        applications[index].statusNote = normalizedStatusNote
+        applications[index].lastContactDate = draft.lastContactDate
         applications[index].tags = normalizedTags(draft.tags)
+        if didStageChange {
+            applications[index].stageEnteredAt = now
+        }
         if shouldInvalidateResearch {
             applications[index].webInterviewResearch = nil
         }
-        applications[index].updatedAt = Date()
+        applications[index].updatedAt = now
+        appendTimelineEvents(
+            to: &applications[index],
+            previousApplication: previousApplication,
+            previousStageTitle: previousStageTitle,
+            nextStageTitle: nextStageTitle,
+            didStageChange: didStageChange,
+            didContactChange: didContactChange,
+            didFeedbackChange: didFeedbackChange,
+            didStatusChange: didStatusChange,
+            at: now
+        )
         selectedApplicationID = id
         touchAndPersist()
     }
@@ -196,9 +275,47 @@ final class JobApplicationStore: ObservableObject {
         guard let index = applications.firstIndex(where: { $0.id == id }) else { return }
         guard applications[index].stageID != stageID else { return }
 
+        let previousStageTitle = stage(for: applications[index].stageID)?.title ?? "Previous stage"
+        let nextStageTitle = stage(for: stageID)?.title ?? "Pipeline"
+        let now = Date()
         applications[index].stageID = stageID
         applications[index].statusNote = "Moved today"
+        applications[index].stageEnteredAt = now
+        applications[index].updatedAt = now
+        applications[index].timeline.insert(
+            JobTimelineEvent(
+                kind: .stageChange,
+                date: now,
+                title: "Moved to \(nextStageTitle)",
+                detail: "Moved from \(previousStageTitle) into \(nextStageTitle)."
+            ),
+            at: 0
+        )
+        selectedApplicationID = id
+        touchAndPersist()
+    }
+
+    func updateWeeklyApplicationTarget(_ target: Int) {
+        let normalizedTarget = max(target, 1)
+        guard weeklyApplicationTargetValue != normalizedTarget else { return }
+        weeklyApplicationTargetValue = normalizedTarget
+        touchAndPersist()
+    }
+
+    func logFollowUp(id: UUID, on date: Date = Date()) {
+        guard let index = applications.firstIndex(where: { $0.id == id }) else { return }
+        let normalizedDate = Calendar.current.startOfDay(for: date)
+        applications[index].lastContactDate = normalizedDate
         applications[index].updatedAt = Date()
+        applications[index].timeline.insert(
+            JobTimelineEvent(
+                kind: .followUp,
+                date: normalizedDate,
+                title: "Follow-up logged",
+                detail: "Recorded a recruiter or company touchpoint."
+            ),
+            at: 0
+        )
         selectedApplicationID = id
         touchAndPersist()
     }
@@ -269,6 +386,7 @@ final class JobApplicationStore: ObservableObject {
         return JobStoreSnapshot(
             stages: persistedStages,
             applications: applications,
+            weeklyApplicationTarget: weeklyApplicationTargetValue,
             deletedStageTombstones: deletedStageTombstones,
             deletedApplicationTombstones: deletedApplicationTombstones,
             selectedApplicationID: selectedApplicationID,
@@ -322,6 +440,7 @@ final class JobApplicationStore: ObservableObject {
         return JobStoreSnapshot(
             stages: mergedStages.isEmpty ? [fallbackStage] : mergedStages,
             applications: mergedApplications,
+            weeklyApplicationTarget: local.updatedAt >= remote.updatedAt ? local.weeklyApplicationTarget : remote.weeklyApplicationTarget,
             deletedStageTombstones: stageTombstones,
             deletedApplicationTombstones: applicationTombstones,
             selectedApplicationID: mergedSelection,
@@ -332,6 +451,7 @@ final class JobApplicationStore: ObservableObject {
     private func apply(snapshot: JobStoreSnapshot) {
         stages = normalizedStages(snapshot.stages.isEmpty ? AppDefaults.defaultStages : snapshot.stages)
         applications = snapshot.applications
+        weeklyApplicationTargetValue = max(snapshot.weeklyApplicationTarget, 1)
         deletedStageTombstones = snapshot.deletedStageTombstones
         deletedApplicationTombstones = snapshot.deletedApplicationTombstones
         selectedApplicationID = snapshot.selectedApplicationID
@@ -349,7 +469,8 @@ final class JobApplicationStore: ObservableObject {
 
         let nextDecisionSnapshot = buildDecisionSnapshot(
             applications: applications,
-            stageLookup: nextStageLookup
+            stageLookup: nextStageLookup,
+            referenceDate: referenceDate
         )
         let nextEmploymentSnapshot = buildEmploymentSnapshot(
             applications: applications,
@@ -395,21 +516,124 @@ final class JobApplicationStore: ObservableObject {
 
     private func buildDecisionSnapshot(
         applications: [JobApplication],
-        stageLookup: [UUID: JobStage]
+        stageLookup: [UUID: JobStage],
+        referenceDate: Date
     ) -> JobDecisionSnapshot {
-        applications.reduce(into: JobDecisionSnapshot.empty) { snapshot, application in
-            let stageKind = stageLookup[application.stageID]?.kind ?? .custom
-
-            if stageKind.isLivePipelineStage {
-                snapshot.activeApplicationsCount += 1
-            }
-
-            if stageKind == .interview {
-                snapshot.interviewCount += 1
-            } else if stageKind == .offer {
-                snapshot.offerCount += 1
-            }
+        let activePipelineApplications = applications.filter {
+            (stageLookup[$0.stageID]?.kind ?? .custom).isLivePipelineStage
         }
+        let interviewCount = applications.filter {
+            let kind = stageLookup[$0.stageID]?.kind ?? .custom
+            return kind == .interview || kind == .offer || kind == .accepted
+        }.count
+        let offerCount = applications.filter {
+            let kind = stageLookup[$0.stageID]?.kind ?? .custom
+            return kind == .offer || kind == .accepted
+        }.count
+        let acceptedCount = applications.filter {
+            (stageLookup[$0.stageID]?.kind ?? .custom) == .accepted
+        }.count
+        let submittedApplicationsCount = applications.filter {
+            let kind = stageLookup[$0.stageID]?.kind ?? .custom
+            return kind != .saved
+        }.count
+        let weeklyApplicationsProgress = applicationsSubmittedThisWeek(
+            applications: applications,
+            stageLookup: stageLookup,
+            referenceDate: referenceDate
+        )
+        let followUpDueCount = activePipelineApplications.filter {
+            isFollowUpDue($0, stageLookup: stageLookup, referenceDate: referenceDate)
+        }.count
+        let staleApplications = activePipelineApplications.filter {
+            isApplicationStale($0, stageLookup: stageLookup, referenceDate: referenceDate)
+        }
+        let highPriorityStaleCount = staleApplications.filter(isHighPriority).count
+        let recentActivityCount = activePipelineApplications.filter {
+            daysSinceMeaningfulActivity(for: $0, referenceDate: referenceDate) <= 7
+        }.count
+
+        let conversions = JobConversionSnapshot(
+            submittedApplicationsCount: submittedApplicationsCount,
+            interviewsReachedCount: interviewCount,
+            offersReachedCount: offerCount,
+            applicationToInterviewRate: conversionRate(numerator: interviewCount, denominator: submittedApplicationsCount),
+            interviewToOfferRate: conversionRate(numerator: offerCount, denominator: max(interviewCount, 0))
+        )
+
+        return JobDecisionSnapshot(
+            totalApplicationsCount: applications.count,
+            activeApplicationsCount: activePipelineApplications.count,
+            interviewCount: interviewCount,
+            offerCount: offerCount,
+            acceptedCount: acceptedCount,
+            weeklyApplicationTarget: weeklyApplicationTargetValue,
+            weeklyApplicationsProgress: weeklyApplicationsProgress,
+            followUpDueCount: followUpDueCount,
+            staleApplicationsCount: staleApplications.count,
+            highPriorityStaleCount: highPriorityStaleCount,
+            pipelineHealth: buildPipelineHealthSnapshot(
+                activeApplicationsCount: activePipelineApplications.count,
+                interviewCount: interviewCount,
+                offerCount: offerCount,
+                weeklyApplicationsProgress: weeklyApplicationsProgress,
+                weeklyApplicationTarget: weeklyApplicationTargetValue,
+                staleApplicationsCount: staleApplications.count,
+                followUpDueCount: followUpDueCount,
+                recentActivityCount: recentActivityCount
+            ),
+            conversions: conversions
+        )
+    }
+
+    private func buildPipelineHealthSnapshot(
+        activeApplicationsCount: Int,
+        interviewCount: Int,
+        offerCount: Int,
+        weeklyApplicationsProgress: Int,
+        weeklyApplicationTarget: Int,
+        staleApplicationsCount: Int,
+        followUpDueCount: Int,
+        recentActivityCount: Int
+    ) -> PipelineHealthSnapshot {
+        let desiredPipelineCount = max(weeklyApplicationTarget * 2, 6)
+        let volumeScore = min(Double(activeApplicationsCount) / Double(desiredPipelineCount), 1) * 35
+        let distributionScore = min((Double(interviewCount) * 7) + (Double(offerCount) * 11), 35)
+        let activityBase = activeApplicationsCount > 0
+            ? (Double(recentActivityCount) / Double(activeApplicationsCount)) * 30
+            : (weeklyApplicationsProgress > 0 ? 8 : 0)
+        let activityPenalty = min(Double(staleApplicationsCount) * 4 + Double(followUpDueCount) * 2, 20)
+        let score = clamped(Int((volumeScore + distributionScore + max(activityBase - activityPenalty, 0)).rounded()), minimum: 0, maximum: 100)
+
+        let tone: StatusTone
+        let label: String
+        let message: String
+
+        switch score {
+        case ..<35:
+            tone = .warning
+            label = "Needs Build"
+            message = "The pipeline is thin or stale. Add more active roles and refresh the quiet ones."
+        case 35..<65:
+            tone = .info
+            label = "Building"
+            message = "You have movement, but you still need more live roles or fresher activity to stabilize conversion odds."
+        case 65..<85:
+            tone = .success
+            label = "Healthy"
+            message = "Volume and stage mix are in a good range. Keep follow-ups moving so it stays healthy."
+        default:
+            tone = .success
+            label = "Strong"
+            message = "The pipeline has good volume, stage depth, and recent activity. Protect that momentum."
+        }
+
+        return PipelineHealthSnapshot(
+            score: score,
+            tone: tone,
+            label: label,
+            message: message
+        )
     }
 
     private func buildEmploymentSnapshot(
@@ -433,7 +657,13 @@ final class JobApplicationStore: ObservableObject {
         JobInsightSnapshot(
             jobsNeeded: employmentSnapshot.acceptedEmployment == nil
                 ? max(10 - decisionSnapshot.activeApplicationsCount, 0)
-                : 0
+                : 0,
+            weeklyApplicationTarget: decisionSnapshot.weeklyApplicationTarget,
+            weeklyApplicationsProgress: decisionSnapshot.weeklyApplicationsProgress,
+            followUpDueCount: decisionSnapshot.followUpDueCount,
+            staleApplicationsCount: decisionSnapshot.staleApplicationsCount,
+            highPriorityStaleCount: decisionSnapshot.highPriorityStaleCount,
+            pipelineHealthScore: decisionSnapshot.pipelineHealth.score
         )
     }
 
@@ -456,7 +686,7 @@ final class JobApplicationStore: ObservableObject {
             companyName: application.companyName,
             role: application.role,
             stageTitle: stageTitle,
-            startDate: application.updatedAt,
+            startDate: application.stageEnteredAt,
             updatedAt: application.updatedAt
         )
     }
@@ -554,8 +784,235 @@ final class JobApplicationStore: ObservableObject {
         return JobAnalyticsSummary(
             pipelinePoints: pipelinePoints,
             timeToHireEstimate: timeToHireEstimate,
-            hiringLikelihood: Int((likelihoodScore * 100).rounded())
+            hiringLikelihood: Int((likelihoodScore * 100).rounded()),
+            weeklyTargetProgress: decisionSnapshot.weeklyApplicationsProgress,
+            weeklyTarget: decisionSnapshot.weeklyApplicationTarget,
+            staleApplicationsCount: decisionSnapshot.staleApplicationsCount,
+            followUpDueCount: decisionSnapshot.followUpDueCount,
+            conversions: decisionSnapshot.conversions
         )
+    }
+
+    private func buildInitialTimeline(
+        companyName: String,
+        role: String,
+        stageTitle: String,
+        dateApplied: Date,
+        lastContactDate: Date?
+    ) -> [JobTimelineEvent] {
+        var events = [
+            JobTimelineEvent(
+                kind: .created,
+                date: dateApplied,
+                title: "Added to \(stageTitle)",
+                detail: "Started tracking \(companyName) for \(role)."
+            )
+        ]
+
+        if let lastContactDate {
+            events.insert(
+                JobTimelineEvent(
+                    kind: .followUp,
+                    date: lastContactDate,
+                    title: "Last contact recorded",
+                    detail: "Saved an existing recruiter or company touchpoint."
+                ),
+                at: 0
+            )
+        }
+
+        return events.sorted { lhs, rhs in
+            if lhs.date == rhs.date {
+                return lhs.title < rhs.title
+            }
+            return lhs.date > rhs.date
+        }
+    }
+
+    private func appendTimelineEvents(
+        to application: inout JobApplication,
+        previousApplication: JobApplication,
+        previousStageTitle: String,
+        nextStageTitle: String,
+        didStageChange: Bool,
+        didContactChange: Bool,
+        didFeedbackChange: Bool,
+        didStatusChange: Bool,
+        at date: Date
+    ) {
+        if didStageChange {
+            application.timeline.insert(
+                JobTimelineEvent(
+                    kind: .stageChange,
+                    date: date,
+                    title: "Moved to \(nextStageTitle)",
+                    detail: "Moved from \(previousStageTitle) into \(nextStageTitle)."
+                ),
+                at: 0
+            )
+        }
+
+        if didContactChange, let lastContactDate = application.lastContactDate {
+            application.timeline.insert(
+                JobTimelineEvent(
+                    kind: .followUp,
+                    date: lastContactDate,
+                    title: "Contact updated",
+                    detail: "Recorded a new recruiter or company touchpoint."
+                ),
+                at: 0
+            )
+        }
+
+        if didFeedbackChange, !application.feedback.isEmpty {
+            application.timeline.insert(
+                JobTimelineEvent(
+                    kind: .feedback,
+                    date: date,
+                    title: "Feedback added",
+                    detail: application.feedback
+                ),
+                at: 0
+            )
+        }
+
+        if didStatusChange, application.statusNote != previousApplication.statusNote {
+            application.timeline.insert(
+                JobTimelineEvent(
+                    kind: .statusUpdate,
+                    date: date,
+                    title: "Status updated",
+                    detail: application.statusNote
+                ),
+                at: 0
+            )
+        }
+    }
+
+    private func applicationsSubmittedThisWeek(
+        applications: [JobApplication],
+        stageLookup: [UUID: JobStage],
+        referenceDate: Date
+    ) -> Int {
+        let calendar = Calendar.current
+        guard let interval = calendar.dateInterval(of: .weekOfYear, for: referenceDate) else {
+            return 0
+        }
+
+        return applications.filter {
+            interval.contains($0.dateApplied) &&
+            (stageLookup[$0.stageID]?.kind ?? .custom) != .saved
+        }.count
+    }
+
+    private func recommendedFollowUpDate(
+        for application: JobApplication,
+        stageLookup: [UUID: JobStage],
+        referenceDate: Date
+    ) -> Date? {
+        let stageKind = stageLookup[application.stageID]?.kind ?? .custom
+        let cadenceDays: Int?
+
+        switch stageKind {
+        case .saved:
+            cadenceDays = 7
+        case .applied:
+            cadenceDays = 5
+        case .interview:
+            cadenceDays = 3
+        case .offer:
+            cadenceDays = 2
+        case .accepted:
+            cadenceDays = nil
+        case .custom:
+            cadenceDays = 6
+        }
+
+        guard let cadenceDays else { return nil }
+        let baseline = application.lastContactDate ?? application.stageEnteredAt
+        let normalizedBaseline = Calendar.current.startOfDay(for: baseline)
+        return Calendar.current.date(byAdding: .day, value: cadenceDays, to: normalizedBaseline)
+    }
+
+    private func daysSinceMeaningfulActivity(
+        for application: JobApplication,
+        referenceDate: Date
+    ) -> Int {
+        let baseline = application.lastContactDate ?? application.stageEnteredAt
+        let calendar = Calendar.current
+        return max(
+            calendar.dateComponents(
+                [.day],
+                from: calendar.startOfDay(for: baseline),
+                to: calendar.startOfDay(for: referenceDate)
+            ).day ?? 0,
+            0
+        )
+    }
+
+    private func isApplicationStale(
+        _ application: JobApplication,
+        stageLookup: [UUID: JobStage],
+        referenceDate: Date
+    ) -> Bool {
+        let stageKind = stageLookup[application.stageID]?.kind ?? .custom
+        let threshold: Int
+
+        switch stageKind {
+        case .saved:
+            threshold = 10
+        case .applied:
+            threshold = 7
+        case .interview:
+            threshold = 5
+        case .offer:
+            threshold = 3
+        case .accepted:
+            return false
+        case .custom:
+            threshold = 7
+        }
+
+        return daysSinceMeaningfulActivity(for: application, referenceDate: referenceDate) > threshold
+    }
+
+    private func isFollowUpDue(
+        _ application: JobApplication,
+        stageLookup: [UUID: JobStage],
+        referenceDate: Date
+    ) -> Bool {
+        guard let nextFollowUpDate = recommendedFollowUpDate(for: application, stageLookup: stageLookup, referenceDate: referenceDate) else {
+            return false
+        }
+
+        return Calendar.current.startOfDay(for: nextFollowUpDate) <= Calendar.current.startOfDay(for: referenceDate)
+    }
+
+    private func priorityRank(for priority: String) -> Int {
+        let normalizedPriority = priority.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if normalizedPriority.contains("urgent") || normalizedPriority.contains("critical") {
+            return 4
+        }
+
+        if normalizedPriority.contains("high") {
+            return 3
+        }
+
+        if normalizedPriority.contains("low") {
+            return 1
+        }
+
+        return 2
+    }
+
+    private func isHighPriority(_ application: JobApplication) -> Bool {
+        priorityRank(for: application.priority) >= 3
+    }
+
+    private func conversionRate(numerator: Int, denominator: Int) -> Int {
+        guard denominator > 0 else { return 0 }
+        return Int((Double(numerator) / Double(denominator) * 100).rounded())
     }
 
     private func sortStages(_ stages: [JobStage]) -> [JobStage] {
@@ -855,6 +1312,16 @@ private extension JobApplicationStore {
                 priority: application.priority,
                 location: application.location,
                 statusNote: application.statusNote,
+                lastContactDate: nil,
+                stageEnteredAt: application.dateApplied,
+                timeline: [
+                    JobTimelineEvent(
+                        kind: .created,
+                        date: application.dateApplied,
+                        title: "Application created",
+                        detail: "Started tracking \(application.companyName) for \(application.role)."
+                    )
+                ],
                 tags: [],
                 webInterviewResearch: nil,
                 createdAt: application.createdAt,
@@ -865,6 +1332,7 @@ private extension JobApplicationStore {
         return JobStoreSnapshot(
             stages: stages,
             applications: applications,
+            weeklyApplicationTarget: 5,
             deletedStageTombstones: [],
             deletedApplicationTombstones: [],
             selectedApplicationID: applications.first?.id,

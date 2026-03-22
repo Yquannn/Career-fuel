@@ -200,7 +200,7 @@ struct AnalyticsView: View {
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(AppPalette.textPrimary)
 
-                    Text("Uses live pipeline stages and predicted burn to estimate hiring pressure over the next few weeks.")
+                    Text("Uses live pipeline stages and average daily spend to estimate hiring pressure over the next few weeks.")
                         .font(.subheadline)
                         .foregroundStyle(AppPalette.textSecondary)
 
@@ -215,7 +215,7 @@ struct AnalyticsView: View {
 
                     if projectedShortage > 0 {
                         Label(
-                            "Current predicted burn suggests a potential shortage within the next \(forecastWindowDays) days. Use the AI budget cards to slow the outflow.",
+                            "Current average daily spend suggests a potential shortage within the next \(forecastWindowDays) days. Use the AI budget cards to slow the outflow.",
                             systemImage: "bolt.badge.clock"
                         )
                         .font(.subheadline)

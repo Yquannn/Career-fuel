@@ -17,6 +17,8 @@ struct ModalView: View {
     @State private var priority: String
     @State private var location: String
     @State private var statusNote: String
+    @State private var hasLastContactDate: Bool
+    @State private var lastContactDate: Date
     @State private var livePreviewSuggestion: AIJobSuggestion?
     @State private var isPreviewLoading = false
     @State private var previewTask: Task<Void, Never>?
@@ -33,6 +35,8 @@ struct ModalView: View {
         _priority = State(initialValue: application?.priority ?? "Standard")
         _location = State(initialValue: application?.location ?? "Remote")
         _statusNote = State(initialValue: application?.statusNote ?? "Updated today")
+        _hasLastContactDate = State(initialValue: application?.lastContactDate != nil)
+        _lastContactDate = State(initialValue: application?.lastContactDate ?? Date())
     }
 
     var body: some View {
@@ -52,6 +56,12 @@ struct ModalView: View {
                 Section("Timeline") {
                     DatePicker("Date Applied", selection: $dateApplied, displayedComponents: .date)
                     TextField("Status Note", text: $statusNote)
+
+                    Toggle("Last contact recorded", isOn: $hasLastContactDate.animation(.easeInOut(duration: 0.18)))
+
+                    if hasLastContactDate {
+                        DatePicker("Last Contact", selection: $lastContactDate, displayedComponents: .date)
+                    }
                 }
 
                 Section("Context") {
@@ -107,8 +117,8 @@ struct ModalView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(AppPalette.textSecondary)
 
-                            if aiService.isWebInterviewResearchEnabled {
-                                Text("Save this application, then open it from the Applications tab to run web-backed interview research with public source links.")
+                            if aiService.isAdvancedAIEnabled {
+                                Text("Save this application, then open it from the Applications tab to run optional advanced AI research with public source links.")
                                     .font(.caption)
                                     .foregroundStyle(AppPalette.textSecondary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -179,6 +189,9 @@ struct ModalView: View {
             priority: priority,
             location: location,
             statusNote: statusNote,
+            lastContactDate: hasLastContactDate ? lastContactDate : nil,
+            stageEnteredAt: application?.stageEnteredAt ?? dateApplied,
+            timeline: application?.timeline ?? [],
             tags: application?.tags ?? [],
             createdAt: application?.createdAt ?? Date(),
             updatedAt: Date()
@@ -207,6 +220,7 @@ struct ModalView: View {
             priority: priority,
             location: location,
             statusNote: statusNote,
+            lastContactDate: hasLastContactDate ? lastContactDate : nil,
             tags: suggestedTags
         )
 
